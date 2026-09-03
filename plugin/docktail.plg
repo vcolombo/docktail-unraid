@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03.5"
+  version="2026.09.03.6"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,16 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.6
+
+Fixes settings not saving.
+
+Apply appeared to do nothing and changes were lost on reload. Unraid validates the CSRF token centrally in its auto_prepend_file and then removes it from $_POST, so the plugin's own second check could only ever fail - answering 403 into the hidden frame the form targeted, invisibly. Generate on the Labels tab and Refresh on the DockTail tab failed the same way.
+
+- Settings now save whatever you enter, including with Enable DockTail set to No.
+- Apply reports its outcome next to the button instead of posting into a hidden frame.
+- Generate and Refresh work again.
 
 ### 2026.09.03.5
 
@@ -30,20 +40,14 @@ Cleans up the plugin pages.
 
 The plugin no longer opens on a DockTail tab that duplicated the Status tab. Following the official Tailscale plugin, the container page now carries the primary view, so the tabs are DockTail | Settings | Labels and the opening screen is the service state, preflight checks and container list.
 
-### 2026.09.03.3
-
-Fixes clickable help not working: no label showed the help cursor.
-
-The feature relied on Unraid's page-load help wiring, which refuses to pin a table row lacking a <td> (so the Containers block got no pin) and only ever sees markup present at load. The plugin now wires its own help on every tab, deferring so it never double-binds on top of Unraid's wiring, and the Status tab rebinds after its AJAX refresh.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.5-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.5/docktail-unraid-2026.09.03.5-noarch-1.txz</URL>
-<SHA256>7c3d8a8356be7e9071cdd1a3862d56602216269d5d54c4f7927460ddcfb946a3</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.6-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.6/docktail-unraid-2026.09.03.6-noarch-1.txz</URL>
+<SHA256>463bc9cbe95b2aa913f4c0e2a13b786330d0a2c5f712938c3321061ac9eef921</SHA256>
 </FILE>
 
 <!--
@@ -58,7 +62,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.5-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.6-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -80,12 +84,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.5')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.6')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03.5"
+echo " Plugin version:   2026.09.03.6"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
