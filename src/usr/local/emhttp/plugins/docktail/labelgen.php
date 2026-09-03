@@ -38,7 +38,7 @@ switch ((string) ($_POST['action'] ?? 'generate')) {
             'values'      => Labels::formValues($info['labels']),
             'labelled'    => $info['labels'] !== [],
             'ports'       => $info['ports'],
-            'hasTemplate' => $info['hasTemplate'],
+            'portSummary' => Labels::summarizePorts($info['ports']),
             'suggestName' => Labels::suggestName($container),
         ], JSON_UNESCAPED_SLASHES);
         break;

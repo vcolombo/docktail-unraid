@@ -545,6 +545,60 @@ final class Labels
     }
 
     /**
+     * Human-readable summary of a container's ports.
+     *
+     * A container that publishes a range (say 50000-50100) otherwise prints a
+     * hundred numbers and buries the handful that matter, so consecutive runs
+     * collapse and the list is capped. The full list still populates the port
+     * field's dropdown.
+     *
+     * @param list<string> $ports
+     */
+    public static function summarizePorts(array $ports, int $maxGroups = 10): string
+    {
+        $numbers = array_values(array_unique(array_map('intval', $ports)));
+        sort($numbers, SORT_NUMERIC);
+
+        if ($numbers === []) {
+            return '';
+        }
+
+        $groups = [];
+        $start  = $numbers[0];
+        $prev   = $numbers[0];
+
+        foreach (array_slice($numbers, 1) as $port) {
+            if ($port === $prev + 1) {
+                $prev = $port;
+                continue;
+            }
+            $groups[] = [$start, $prev];
+            $start    = $port;
+            $prev     = $port;
+        }
+        $groups[] = [$start, $prev];
+
+        $rendered = [];
+        foreach (array_slice($groups, 0, $maxGroups) as [$from, $to]) {
+            if ($from === $to) {
+                $rendered[] = (string) $from;
+            } elseif ($to === $from + 1) {
+                // A run of two reads worse as a range than as two numbers.
+                $rendered[] = $from . ', ' . $to;
+            } else {
+                $rendered[] = $from . '-' . $to;
+            }
+        }
+
+        $hidden = count($groups) - $maxGroups;
+        if ($hidden > 0) {
+            $rendered[] = '+' . $hidden . ' more';
+        }
+
+        return implode(', ', $rendered);
+    }
+
+    /**
      * A service name suggestion derived from the container name: Tailscale
      * Service names allow only letters, digits and hyphens.
      */
@@ -907,7 +961,11 @@ function docktailLoadContainer() {
         $('#docktail_ports').html($.map(ports, function(p) {
             return '<option value="' + p + '"></option>';
         }).join(''));
-        $('#docktail_port_note').text(ports.length ? 'Exposes: ' + ports.join(', ') : 'No TCP ports detected.');
+        // The summary collapses published ranges; the dropdown above still
+        // offers every individual port.
+        $('#docktail_port_note').text(ports.length
+            ? 'Exposes: ' + (data.portSummary || ports.join(', '))
+            : 'No TCP ports detected.');
 
         if (data.labelled) {
             // Load what the container already declares, so this is an edit.
