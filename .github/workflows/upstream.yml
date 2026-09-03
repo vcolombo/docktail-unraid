@@ -1,0 +1,106 @@
+name: Watch upstream DockTail
+
+# Opens a PR when marvinvr/docktail publishes a newer stable tag. The pin stays
+# explicit: this proposes the bump, a human merges it and cuts the release, so
+# one plugin release still means one tested plugin/DockTail pairing.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Find the newest stable upstream tag
+        id: upstream
+        run: |
+          set -euo pipefail
+
+          current=$(jq -r .docktailVersion plugin/plugin.json)
+
+          # Stable releases only: upstream also tags pre-release lines such as
+          # 2.0.0-cloud.16, which must never be pinned automatically.
+          latest=$(git ls-remote --tags --refs https://github.com/marvinvr/docktail.git \
+            | sed 's#.*refs/tags/##' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -1)
+
+          if [ -z "$latest" ]; then
+            echo "Could not determine the newest upstream tag." >&2
+            exit 1
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
+
+          # sort -V decides, so a hand-pinned newer version is never walked back.
+          if [ "$current" = "$latest" ] || [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$current" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Pinned $current is current (upstream latest $latest)."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream $latest is newer than pinned $current."
+          fi
+
+      - name: Repin the submodule and version stamp
+        if: steps.upstream.outputs.changed == 'true'
+        run: ./bump.sh "${{ steps.upstream.outputs.latest }}"
+
+      - uses: actions/setup-go@v5
+        if: steps.upstream.outputs.changed == 'true'
+        with:
+          go-version-file: docktail/go.mod
+          cache-dependency-path: docktail/go.sum
+
+      # A PR opened with GITHUB_TOKEN does not trigger workflows, so CI will not
+      # run on it. Prove the new pin actually cross-compiles here instead of
+      # opening a PR whose checks never start.
+      - name: Verify the new pin builds
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          ./build.sh
+          file src/usr/local/emhttp/plugins/docktail/bin/docktail
+          cat src/usr/local/emhttp/plugins/docktail/VERSION
+
+      - name: Open a pull request
+        if: steps.upstream.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: upstream/docktail-${{ steps.upstream.outputs.latest }}
+          delete-branch: true
+          add-paths: |
+            docktail
+            plugin/plugin.json
+          commit-message: "chore: pin DockTail ${{ steps.upstream.outputs.latest }}"
+          title: "chore: pin DockTail ${{ steps.upstream.outputs.latest }}"
+          body: |
+            Upstream published DockTail `${{ steps.upstream.outputs.latest }}`; this repository pinned `${{ steps.upstream.outputs.current }}`.
+
+            Opened automatically by `.github/workflows/upstream.yml`. The submodule and `plugin/plugin.json`'s `docktailVersion` were repinned together by `bump.sh`, so they cannot drift.
+
+            **Verified here:** the new pin cross-compiles and stages a static `linux/amd64` binary. CI does not run on this PR, because a PR opened with `GITHUB_TOKEN` does not trigger workflows — that build step is the substitute, not an omission.
+
+            **Before merging**, check the upstream changes for anything this plugin models directly, since those are coupled by hand:
+
+            - new or renamed `docktail.*` label keys (`types/types.go`) → the Labels tab's builder and `formValues()` map
+            - changes to the `tailscale serve status --json` shape (`tailscale/client.go`) → the DockTail tab's advertised-services table
+            - new environment variables (`main.go`) → the Settings tab and `rc.docktail`'s export list
+            - a change to the 30s shutdown cleanup budget → `STOP_TIMEOUT` in `rc.docktail`, which must stay above it
+
+            Merging does not ship anything. Cut a dated release afterwards, with a **zero-padded** same-day counter.

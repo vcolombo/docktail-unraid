@@ -82,6 +82,14 @@ re-advertises them once Docker is back.
 ./build.sh --package   # additionally build a local .txz (GNU tar required)
 ```
 
+`.github/workflows/upstream.yml` watches `marvinvr/docktail` daily and opens a
+PR when a newer **stable** tag appears (pre-release lines such as
+`2.0.0-cloud.16` are ignored). It repins the submodule and `docktailVersion`
+together and proves the new pin cross-compiles, but merging is deliberately
+manual: the plugin models DockTail's label keys, its `serve status --json`
+shape and its shutdown budget by hand, so one release should mean one tested
+pairing. Run it on demand from the Actions tab.
+
 Releases are cut by creating a GitHub Release whose **tag and name are both**
 `YYYY.MM.DD`. For a second release the same day, append a **zero-padded**
 counter: `.01`, `.02`, … `.10`. Mark it as a pre-release to publish only the
