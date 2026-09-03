@@ -345,6 +345,7 @@ final class Status
     {
         ob_start();
         $state = (string) $snapshot['state'];
+        $token = csrfToken();
         ?>
 <table class="unraid tablesorter"><thead><tr><td>Service</td></tr></thead></table>
 
@@ -352,6 +353,17 @@ final class Status
     <dt>DockTail:</dt>
     <dd><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
 </dl>
+
+<form method="POST" id="docktail_control" action="/plugins/docktail/apply.php" target="progressFrame">
+<input type="hidden" name="csrf_token" value="<?= h($token); ?>">
+<input type="hidden" name="action" id="docktail_action" value="restart">
+<table><tr><td style="vertical-align: top">
+    <input type="button" value="Start" onclick="docktailControl('start')">
+    <input type="button" value="Stop" onclick="docktailControl('stop')">
+    <input type="button" value="Restart" onclick="docktailControl('restart')">
+    <input type="button" value="Refresh" onclick="docktailRefresh()">
+</td></tr></table>
+</form>
 
 <table class="unraid tablesorter">
 <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
@@ -367,7 +379,7 @@ final class Status
         <td><?= h($row['detail']); ?></td>
     </tr>
     <?php if ($ok !== true) { ?>
-    <tr><td colspan="3"><blockquote class="inline_help"><?= $row['remedy']; ?></blockquote></td></tr>
+    <tr><td colspan="3"><div class="docktail-remedy"><?= $row['remedy']; ?></div></td></tr>
     <?php }
 } ?>
 </tbody>
@@ -376,10 +388,10 @@ final class Status
 <table class="unraid tablesorter"><thead><tr><td>Containers</td></tr></thead></table>
 
 <?php if ($snapshot['rows'] === []) { ?>
-<blockquote class="inline_help">
+<div class="docktail-remedy">
     No running container carries a <code>docktail.*</code> label. Use the Labels tab to
     generate one, then paste it into the container's Extra Parameters field.
-</blockquote>
+</div>
 <?php } else { ?>
 <table class="unraid tablesorter">
 <thead><tr><th>Container</th><th>Service</th><th>Container port</th><th>Protocol</th><th>Advertised</th></tr></thead>
@@ -398,10 +410,10 @@ final class Status
 <?php }
 
 if (($snapshot['serveStatusPlain'] ?? '') !== '') { ?>
-<blockquote class="inline_help">
+<div class="docktail-remedy">
     This Tailscale version does not report Services as JSON; raw
     <code>tailscale serve status</code> output follows.
-</blockquote>
+</div>
 <pre><?= h((string) $snapshot['serveStatusPlain']); ?></pre>
 <?php } ?>
 
@@ -431,19 +443,20 @@ if (($snapshot['serveStatusPlain'] ?? '') !== '') { ?>
         $token = csrfToken();
 
         ob_start(); ?>
-<form method="POST" id="docktail_control" action="/plugins/docktail/apply.php" target="progressFrame">
-<input type="hidden" name="csrf_token" value="<?= h($token); ?>">
-<input type="hidden" name="action" id="docktail_action" value="restart">
-<dl>
-    <dt>&nbsp;</dt>
-    <dd>
-        <input type="button" value="Start" onclick="docktailControl('start')">
-        <input type="button" value="Stop" onclick="docktailControl('stop')">
-        <input type="button" value="Restart" onclick="docktailControl('restart')">
-        <input type="button" value="Refresh" onclick="docktailRefresh()">
-    </dd>
-</dl>
-</form>
+<style>
+/* Remedies and empty-state notes must always be readable. Unraid's
+   blockquote.inline_help is hidden until the user toggles Help, which is right
+   for field help on the Settings tab but wrong for a failing check here. */
+.docktail-remedy {
+    margin: 4px 0 4px 18px;
+    padding: 0;
+    color: #ff8c2f;
+    font-style: italic;
+}
+.docktail-remedy code {
+    font-style: normal;
+}
+</style>
 
 <div id="docktail_status"><?= self::renderBody(self::snapshot()); ?></div>
 
