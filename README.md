@@ -7,6 +7,14 @@ TLS-terminated TCP and Funnel — without giving each app its own Tailscale devi
 DockTail runs as a service on the Unraid host, next to the official Tailscale
 plugin's `tailscaled`, and is managed from **Settings → Network Services → DockTail**.
 
+## Credits
+
+DockTail itself is written by **[marvinvr](https://github.com/marvinvr)** —
+[marvinvr/docktail](https://github.com/marvinvr/docktail). This repository is only
+the Unraid packaging around it: it pins that project as a submodule, builds its
+binary unmodified, and adds the webGUI pages and service script Unraid needs. All
+credit for DockTail's design and implementation belongs upstream.
+
 ## Requirements
 
 - Unraid 7.0 or newer.
@@ -81,9 +89,13 @@ pre-release to publish only the `-preview` channel.
 
 ## Documentation
 
+- [DockTail upstream source (marvinvr/docktail)](https://github.com/marvinvr/docktail)
 - [DockTail documentation](https://docktail.org)
 - [Unraid installation](https://docktail.org/#installation)
 
 ## License
 
-AGPL-3.0, matching the DockTail binary this plugin ships.
+AGPL-3.0, matching the DockTail binary this plugin ships. DockTail is
+copyright its upstream author, [marvinvr](https://github.com/marvinvr); the
+Unraid packaging in this repository is copyright
+[vcolombo](https://github.com/vcolombo). Both are AGPL-3.0.
