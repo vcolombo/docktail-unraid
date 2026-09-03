@@ -378,11 +378,9 @@ final class Status
         $state = (string) $snapshot['state'];
         $token = csrfToken();
         ?>
-<table class="unraid tablesorter"><thead><tr><td>Service</td></tr></thead></table>
-
 <dl>
-    <dt>DockTail:</dt>
-    <dd><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
+    <dt>Service:</dt>
+    <dd class="docktail-inline"><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
 </dl>
 <blockquote class="inline_help">
     Whether the DockTail service is running on this Unraid host. It only starts when
@@ -397,7 +395,7 @@ final class Status
 <input type="hidden" name="action" id="docktail_action" value="restart">
 <dl>
     <dt>Service controls:</dt>
-    <dd>
+    <dd class="docktail-inline">
         <input type="button" value="Start" onclick="docktailControl('start')">
         <input type="button" value="Stop" onclick="docktailControl('stop')">
         <input type="button" value="Restart" onclick="docktailControl('restart')">
@@ -429,7 +427,7 @@ final class Status
     ?>
 <dl>
     <dt><?= h($row['label']); ?>:</dt>
-    <dd><?= $mark; ?> <span class="docktail-detail"><?= h($row['detail']); ?></span></dd>
+    <dd class="docktail-inline"><?= $mark; ?> <span class="docktail-detail"><?= h($row['detail']); ?></span></dd>
 </dl>
 <?php if ($ok !== true) { ?>
 <div class="docktail-remedy"><?= $row['remedy']; ?></div>
@@ -530,7 +528,7 @@ final class Status
    until the user clicks the label or toggles Help, which is right for
    explanatory text but wrong for what to do about a failing check. */
 .docktail-remedy {
-    margin: 4px 0 4px 18px;
+    margin: 2px 0 2px 18px;
     padding: 0;
     color: #ff8c2f;
     font-style: italic;
@@ -540,6 +538,34 @@ final class Status
 }
 .docktail-detail {
     opacity: 0.75;
+}
+
+/* Unraid stacks dd content: `dd { display:flex; flex-direction:column }` above
+   769px. That is right for stacked form controls, but it puts a check mark and
+   its path on separate lines and turns a button row into a button column. */
+.docktail-help-scope dd.docktail-inline {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .5rem;
+}
+
+/* Unraid's own `input:not([type="submit"])` rule also matches button inputs and
+   caps them at 400px, which is why these stretched across the page. */
+.docktail-help-scope dd.docktail-inline input[type="button"],
+.docktail-help-scope dd.docktail-inline input[type="submit"] {
+    width: auto;
+    max-width: none;
+}
+
+/* Tighter rows, so the checks scan as a list rather than a form. Scoped to this
+   view: every tab shares one DOM, and Settings and Labels are real forms that
+   want Unraid's default spacing. */
+#docktail_status dl {
+    padding: .35rem 0;
+}
+#docktail_status dl + dl {
+    margin-top: 0;
 }
 </style>
 
