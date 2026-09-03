@@ -1,0 +1,105 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN>
+
+
+
+<PLUGIN
+  name="docktail-preview"
+  author="vcolombo"
+  version="2026.09.03"
+  launch="Settings/DockTail"
+  pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail-preview.plg"
+  support="https://github.com/vcolombo/docktail-unraid/issues"
+  min="7.0.0"
+>
+
+<CHANGES>
+<![CDATA[
+
+### 2026.09.03
+
+First test release of the DockTail Unraid plugin.
+
+- Installs the DockTail 1.7.9 binary as a native host service, bound to the Docker lifecycle.
+- Settings / Status / Labels tabs under Settings -> Network Services -> DockTail.
+- Requires the official Tailscale plugin and a tagged Unraid node.
+
+
+For older releases, see https://github.com/vcolombo/docktail-unraid/releases
+]]>
+</CHANGES>
+
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03/docktail-unraid-2026.09.03-noarch-1.txz</URL>
+<SHA256>00ac3da01f135f7ca4a14ce8ef3798585c66981904100449e2bf66720df87800</SHA256>
+</FILE>
+
+<!--
+The 'install' script. Unraid re-installs every /boot/config/plugins/*.plg on
+boot, so this runs at boot too: it must be idempotent and must not fail when
+Docker or Tailscale are still down.
+-->
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
+    rm -rf /usr/local/emhttp/plugins/docktail
+fi
+
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03-noarch-1.txz
+
+mkdir -p /boot/config/plugins/docktail
+
+# Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
+# repo at /boot/.git.
+echo "credentials.cfg" > /boot/config/plugins/docktail/.gitignore
+
+if [ ! -f "/boot/config/plugins/docktail/credentials.cfg" ]; then
+    install -m 0600 /dev/null /boot/config/plugins/docktail/credentials.cfg
+fi
+chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+
+# Drop the other release channel so both are never installed at once.
+rm -f /boot/config/plugins/docktail.plg
+rm -f /var/log/plugins/docktail.plg
+
+# Start (or restart) the daemon. Deferred, so a blocking Unraid event returns
+# immediately.
+/usr/local/emhttp/plugins/docktail/restart.sh
+
+# Clean up superseded packages.
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03')
+
+echo ""
+echo "----------------------------------------------------"
+echo " docktail-preview has been installed."
+echo " Plugin version:   2026.09.03"
+echo " DockTail version: 1.7.9"
+echo ""
+echo " Configure it under Settings -> Network Services ->"
+echo " DockTail. DockTail needs the Tailscale plugin and a"
+echo " tagged Unraid node; the Status tab checks both."
+echo "----------------------------------------------------"
+echo ""
+]]>
+</INLINE>
+</FILE>
+
+<!--
+The 'remove' script. Settings under /boot/config/plugins/docktail are left in place:
+Unraid convention is that plugin settings survive removal.
+-->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+/usr/local/etc/rc.d/rc.docktail stop 2>/dev/null
+
+removepkg docktail-unraid
+
+rm -rf /usr/local/emhttp/plugins/docktail
+rm -f /boot/config/plugins/docktail/*.txz
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>
