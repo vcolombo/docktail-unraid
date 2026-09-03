@@ -43,11 +43,25 @@ switch ((string) ($_POST['action'] ?? 'generate')) {
         ], JSON_UNESCAPED_SLASHES);
         break;
 
+    case 'strip':
+        // Un-enrolling: the container's Extra Parameters with every
+        // docktail.* label removed and everything else preserved.
+        $info    = Labels::containerInfo($container);
+        $stripped = Labels::stripDocktailLabels($info['extraParams']);
+
+        echo json_encode([
+            'errors'      => [],
+            'extraParams' => $stripped,
+            'hasTemplate' => $info['hasTemplate'],
+            'hadLabels'   => $info['labels'] !== [],
+        ], JSON_UNESCAPED_SLASHES);
+        break;
+
     default:
         $result = Labels::build($_POST);
 
         if (is_array($result)) {
-            echo json_encode(['errors' => $result, 'labels' => '', 'extraParams' => ''], JSON_UNESCAPED_SLASHES);
+            echo json_encode(['errors' => $result, 'warnings' => [], 'labels' => '', 'extraParams' => ''], JSON_UNESCAPED_SLASHES);
             break;
         }
 
@@ -59,6 +73,7 @@ switch ((string) ($_POST['action'] ?? 'generate')) {
 
         echo json_encode([
             'errors'      => [],
+            'warnings'    => Labels::nameWarnings((string) ($_POST['service_name'] ?? ''), $container),
             'labels'      => $result,
             'extraParams' => Labels::mergeExtraParams($existing, $result),
             'merged'      => $info['hasTemplate'] && Labels::stripDocktailLabels($existing) !== '',

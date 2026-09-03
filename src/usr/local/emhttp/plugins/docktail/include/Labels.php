@@ -545,6 +545,112 @@ final class Labels
     }
 
     /**
+     * Every running container with its DockTail enrolment state.
+     *
+     * One sweep, not one `docker inspect` per row: Status::labelledContainers()
+     * is memoised for the request, so this costs the same whether it is called
+     * once or by every caller on the page.
+     *
+     * @return list<array{name: string, service: string, enrolled: bool, funnel: bool}>
+     */
+    public static function overview(): array
+    {
+        $labelled = [];
+        foreach (Status::labelledContainers() as $container) {
+            $labelled[$container['name']] = $container['labels'];
+        }
+
+        return self::overviewFrom(self::containerNames(), $labelled);
+    }
+
+    /**
+     * @param  list<string>                       $names
+     * @param  array<string, array<string,string>> $labelled
+     * @return list<array{name: string, service: string, enrolled: bool, funnel: bool}>
+     */
+    public static function overviewFrom(array $names, array $labelled): array
+    {
+        $rows = [];
+        foreach ($names as $name) {
+            $labels  = $labelled[$name] ?? [];
+            $service = $labels['docktail.service.name'] ?? '';
+
+            $rows[] = [
+                'name'     => $name,
+                'service'  => $service === '' ? '' : 'svc:' . $service,
+                'enrolled' => $labels !== [],
+                'funnel'   => ($labels['docktail.funnel.enable'] ?? '') === 'true',
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Warnings - not errors - about reusing a Service name.
+     *
+     * Two containers advertising one Service reconcile against each other
+     * indefinitely, which is confusing to diagnose from the log. Reuse is still
+     * legitimate when replacing a container, so this never blocks generation.
+     *
+     * @return list<string>
+     */
+    public static function nameWarnings(string $serviceName, string $container): array
+    {
+        if (trim($serviceName) === '') {
+            return [];
+        }
+
+        return self::nameWarningsFrom(
+            $serviceName,
+            $container,
+            Status::labelledContainers(),
+            array_keys(Status::advertisedServices()['services'])
+        );
+    }
+
+    /**
+     * The decision itself, over data rather than over Docker.
+     *
+     * @param  list<array{name: string, labels: array<string, string>}> $containers
+     * @param  list<string>                                             $advertised  "svc:<name>" keys
+     * @return list<string>
+     */
+    public static function nameWarningsFrom(string $serviceName, string $container, array $containers, array $advertised): array
+    {
+        $serviceName = trim($serviceName);
+        if ($serviceName === '') {
+            return [];
+        }
+
+        $warnings = [];
+        $ownsName = false;
+
+        foreach ($containers as $other) {
+            if (($other['labels']['docktail.service.name'] ?? '') !== $serviceName) {
+                continue;
+            }
+            if ($other['name'] === $container) {
+                $ownsName = true;
+                continue;
+            }
+            $warnings[] = 'Container ' . htmlspecialchars($other['name'], ENT_QUOTES)
+                . ' already uses this service name. Two containers advertising one Service will '
+                . 'fight over it, each undoing the other on every reconcile pass.';
+        }
+
+        // Advertised on this node but claimed by no labelled container: a
+        // leftover, or something outside DockTail's control.
+        if ($warnings === [] && ! $ownsName && in_array('svc:' . $serviceName, $advertised, true)) {
+            $warnings[] = 'svc:' . htmlspecialchars($serviceName, ENT_QUOTES)
+                . ' is already advertised on this node by something else. If that is a leftover, it clears on the '
+                . 'next reconcile pass; if another host advertises it, the two will compete.';
+        }
+
+        return $warnings;
+    }
+
+    /**
      * Human-readable summary of a container's ports.
      *
      * A container that publishes a range (say 50000-50100) otherwise prints a
@@ -617,7 +723,7 @@ final class Labels
     public static function render(): string
     {
         $token      = csrfToken();
-        $containers = self::containerNames();
+        $overview   = self::overview();
 
         ob_start(); ?>
 <!-- Unraid does not load these globally; its own pages that use the switch
@@ -642,6 +748,34 @@ final class Labels
     rest of the options.
 </blockquote>
 
+<table class="unraid tablesorter"><thead><tr><td>Enrolment</td></tr></thead></table>
+<blockquote class="inline_help">
+    Which running containers carry <code>docktail.*</code> labels. A container with no
+    labels is simply not exposed by DockTail; nothing is wrong with it.
+    <br><br>
+    Pick one below to edit its labels, or to enrol it for the first time.
+</blockquote>
+
+<?php if ($overview === []) { ?>
+<div class="docktail-remedy">
+    No running containers found. Start the array and Docker, then reload.
+</div>
+<?php } else { ?>
+<table class="unraid tablesorter">
+<thead><tr><th>Container</th><th>Service</th><th>Funnel</th><th>Enrolled</th></tr></thead>
+<tbody>
+<?php foreach ($overview as $row) { ?>
+    <tr>
+        <td><?= h($row['name']); ?></td>
+        <td><?= $row['service'] === '' ? '&mdash;' : h($row['service']); ?></td>
+        <td><?= $row['funnel'] ? '<span class="orange-text">yes</span>' : '&mdash;'; ?></td>
+        <td><?= $row['enrolled'] ? '<span class="green-text">&#10004;</span>' : '&mdash;'; ?></td>
+    </tr>
+<?php } ?>
+</tbody>
+</table>
+<?php } ?>
+
 <form id="docktail_labels">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
 
@@ -650,8 +784,8 @@ final class Labels
     <dd>
         <select name="container" id="docktail_container" size="1">
             <option value="">-- pick a container --</option>
-<?php foreach ($containers as $name) { ?>
-            <option value="<?= h($name); ?>"><?= h($name); ?></option>
+<?php foreach ($overview as $row) { ?>
+            <option value="<?= h($row['name']); ?>"><?= h($row['name']); ?><?= $row['enrolled'] ? ' (enrolled)' : ''; ?></option>
 <?php } ?>
         </select>
         <span id="docktail_container_note" class="docktail-apply-result"></span>
@@ -886,6 +1020,7 @@ final class Labels
 <table class="unraid tablesorter"><thead><tr><td>Extra Parameters</td></tr></thead></table>
 
 <div id="docktail_labels_errors" class="docktail-remedy docktail-hidden"></div>
+<div id="docktail_labels_warnings" class="docktail-warning docktail-hidden"></div>
 
 <dl>
     <dt>Paste into Extra Parameters:</dt>
@@ -905,12 +1040,22 @@ final class Labels
 </blockquote>
 
 <dl>
-    <dt>&nbsp;</dt>
+    <dt>Actions:</dt>
     <dd class="docktail-inline">
         <input type="button" value="Copy" onclick="docktailCopy()">
+        <input type="button" value="Remove DockTail labels" onclick="docktailStrip()">
         <span id="docktail_copy_note" class="docktail-apply-result"></span>
     </dd>
 </dl>
+<blockquote class="inline_help">
+    <strong>Remove DockTail labels</strong> replaces the box with this container's Extra
+    Parameters minus every <code>docktail.*</code> label, leaving your other arguments
+    untouched &mdash; paste that back to un-enrol the container.
+    <br><br>
+    The Service stays advertised until DockTail's next reconcile pass notices the container
+    no longer asks for it. Whether the Service <em>definition</em> is also deleted from your
+    tailnet is governed by <em>Delete unused services</em> on the Settings tab.
+</blockquote>
 
 <script>
 var docktailGenTimer = null;
@@ -927,11 +1072,22 @@ function docktailGenerate() {
                 // Errors are shown separately: emitting them into the output box
                 // made an invalid config look pasteable.
                 errors.html(data.errors.join('<br>')).removeClass('docktail-hidden');
+                $('#docktail_labels_warnings').addClass('docktail-hidden').empty();
                 $('#docktail_labels_out').val('');
                 return;
             }
 
             errors.addClass('docktail-hidden').empty();
+
+            // Warnings are advisory and must not read as failures: reusing a
+            // service name is legitimate when replacing a container.
+            var warnings = $('#docktail_labels_warnings');
+            if (data.warnings && data.warnings.length) {
+                warnings.html(data.warnings.join('<br>')).removeClass('docktail-hidden');
+            } else {
+                warnings.addClass('docktail-hidden').empty();
+            }
+
             $('#docktail_labels_out').val(data.extraParams || '');
             // Written to its own element: the container picker's note reports the
             // load, and a regeneration must not wipe it.
@@ -1019,6 +1175,43 @@ function docktailLoadContainer() {
         }
 
         docktailGenerate();
+    }, 'json');
+}
+
+/*
+ * Un-enrol: swap the output for the container's Extra Parameters with every
+ * docktail.* label removed. Deliberately does not touch the form, so the
+ * generated value is one click away again.
+ */
+function docktailStrip() {
+    var container = $('#docktail_container').val();
+    var note = $('#docktail_copy_note');
+
+    if (!container) {
+        note.text('Pick a container first.');
+        return;
+    }
+
+    $.post('/plugins/docktail/labelgen.php', {
+        csrf_token: $('#docktail_labels input[name="csrf_token"]').val(),
+        action: 'strip',
+        container: container
+    }, function(data) {
+        $('#docktail_labels_errors').addClass('docktail-hidden').empty();
+        $('#docktail_labels_warnings').addClass('docktail-hidden').empty();
+        $('#docktail_labels_out').val(data.extraParams || '');
+
+        if (!data.hasTemplate) {
+            note.text('No dockerMan template found; clear the docktail.* labels from Extra Parameters by hand.');
+        } else if (!data.hadLabels) {
+            note.text('That container carries no DockTail labels.');
+        } else if (data.extraParams) {
+            note.text('DockTail labels removed - paste this back to un-enrol.');
+        } else {
+            note.text('DockTail labels removed - Extra Parameters should now be empty.');
+        }
+
+        $('#docktail_merge_note').text('');
     }, 'json');
 }
 

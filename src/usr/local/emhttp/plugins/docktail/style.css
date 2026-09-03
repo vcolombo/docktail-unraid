@@ -63,3 +63,15 @@
 .docktail-hidden {
     display: none;
 }
+
+/* Advisory, not a failure: reusing a Service name is legitimate when replacing
+   a container, so warnings are visually distinct from remedies. */
+.docktail-warning {
+    margin: 2px 0 2px 18px;
+    padding: 0;
+    font-style: italic;
+    opacity: 0.9;
+}
+.docktail-warning code {
+    font-style: normal;
+}
