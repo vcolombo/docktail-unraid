@@ -222,25 +222,46 @@ final class Status
     /**
      * Services currently advertised by tailscaled, keyed by "svc:<name>".
      *
-     * @return array{services: array<string, array<string, mixed>>, raw: string}
+     * Three outcomes, and they must not be confused: a config with Services, a
+     * config with none (normal - nothing is advertised right now), and output
+     * that could not be read at all. Treating the middle case as the last one
+     * made an empty serve config report itself as a Tailscale version problem.
+     *
+     * @return array{services: array<string, array<string, mixed>>, raw: string, degraded: bool}
      */
     public static function advertisedServices(): array
     {
         if ( ! file_exists(self::TAILSCALE_BIN)) {
-            return ['services' => [], 'raw' => ''];
+            return ['services' => [], 'raw' => '', 'degraded' => false];
         }
 
-        $json   = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status --json');
-        $parsed = json_decode($json['out'], true);
+        $out    = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status --json')['out'];
+        $parsed = json_decode($out, true);
 
-        if (is_array($parsed) && isset($parsed['Services']) && is_array($parsed['Services'])) {
-            return ['services' => $parsed['Services'], 'raw' => ''];
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // The CLI can print warnings ahead of the JSON; DockTail strips
+            // these too before parsing.
+            $brace = strpos($out, '{');
+            if ($brace !== false) {
+                $parsed = json_decode(substr($out, $brace), true);
+            }
         }
 
-        // No Services key: show the plain-text output rather than nothing.
+        if (json_last_error() === JSON_ERROR_NONE) {
+            // Valid JSON. "null" and "{}" both mean nothing is advertised,
+            // which is a state, not a failure.
+            $services = is_array($parsed) && isset($parsed['Services']) && is_array($parsed['Services'])
+                ? $parsed['Services']
+                : [];
+
+            return ['services' => $services, 'raw' => '', 'degraded' => false];
+        }
+
+        // Genuinely unreadable: fall back to the plain-text output so the page
+        // shows something real rather than an empty table.
         $plain = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status');
 
-        return ['services' => [], 'raw' => $plain['out']];
+        return ['services' => [], 'raw' => $plain['out'], 'degraded' => true];
     }
 
     /**
@@ -364,6 +385,7 @@ final class Status
             'rows'             => self::serviceRows($advertised['services']),
             'advertised'       => array_keys($advertised['services']),
             'serveStatusPlain' => $advertised['raw'],
+            'serveUnreadable'  => $advertised['degraded'],
             'pluginVersion'    => pluginVersion(),
             'docktailVersion'  => docktailVersion(),
         ];
@@ -472,9 +494,21 @@ final class Status
 </table>
 <?php } ?>
 
-<?php if (($snapshot['serveStatusPlain'] ?? '') !== '') { ?>
+<?php
+// Nothing advertised while the service is up is usually just timing: DockTail
+// withdraws everything when it stops, and re-advertises on its next reconcile.
+if ($snapshot['rows'] !== [] && $snapshot['advertised'] === [] && $state === 'Running' && ! $snapshot['serveUnreadable']) { ?>
 <div class="docktail-remedy">
-    This Tailscale version does not report Services as JSON; raw
+    <code>tailscaled</code> is advertising nothing yet. After a start or restart DockTail
+    re-advertises on its next reconcile pass, so this clears within one reconcile interval
+    (60 seconds by default) &mdash; press Refresh again. If it persists, check
+    <code>/var/log/docktail.log</code>.
+</div>
+<?php } ?>
+
+<?php if ($snapshot['serveUnreadable']) { ?>
+<div class="docktail-remedy">
+    Could not read the serve configuration as JSON; the raw
     <code>tailscale serve status</code> output follows.
 </div>
 <pre><?= h((string) $snapshot['serveStatusPlain']); ?></pre>
@@ -574,6 +608,13 @@ function docktailControl(action) {
     }).done(function(data) {
         // The endpoint's first line is the answer; the rest is rc output.
         message = String(data).split('\n')[0].trim() || 'Done.';
+
+        // A stop withdraws every Service, so after starting again the table
+        // stays empty until the next reconcile pass. Say so, rather than
+        // leaving a screen of crosses to be read as a failure.
+        if (action === 'start' || action === 'restart') {
+            message += ' Services re-advertise on the next reconcile pass.';
+        }
     }).fail(function(xhr) {
         failed  = true;
         message = xhr.statusText === 'timeout'
