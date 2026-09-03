@@ -144,5 +144,72 @@ function renderOverview(): string
     and builds it unmodified, so this changes only when the plugin is updated.
 </blockquote>
     <?php
+    return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
+}
+
+/**
+ * Click-to-toggle wiring for this plugin's help blocks.
+ *
+ * Unraid does this itself in DefaultPageLayout/BodyInlineJS.php, but only for
+ * markup present at page load, and only when the pinned row contains a <td> -
+ * a table whose header row uses <th> is silently skipped. This binder covers
+ * what Unraid misses and, on the Status tab, the fragment injected over AJAX.
+ *
+ * It defers past Unraid's own ready handler and skips any label Unraid already
+ * pinned (it marks those with cursor:help). Binding a second handler to the
+ * same label would toggle the block twice per click, which looks exactly like
+ * help being broken.
+ */
+function helpScript(): string
+{
+    ob_start(); ?>
+<script>
+function docktailBindHelp(scope) {
+    var root = scope ? $(scope) : $('.docktail-help-scope');
+
+    root.find('blockquote.inline_help').each(function() {
+        var help = $(this);
+        if (!help.attr('id')) {
+            help.attr('id', 'docktailhelp' + Math.random().toString(36).slice(2));
+        }
+        var helpId = help.attr('id');
+
+        var pin = help.prev();
+        if (!pin.prop('nodeName')) {
+            pin = help.parent().prev();
+        }
+        while (pin.prop('nodeName') && pin.prop('nodeName').search(/(table|dl)/i) == -1) {
+            pin = pin.prev();
+        }
+        if (!pin.prop('nodeName')) {
+            return;
+        }
+
+        pin.find('dt:last,tr:first').each(function() {
+            var node = $(this);
+
+            // Already pinned, by Unraid or by an earlier pass.
+            if (/cursor:\s*help/i.test(node.attr('style') || '')) {
+                return;
+            }
+            // Same exclusions Unraid applies: a label that is only a control or
+            // a spacer is not a label.
+            var html = node.html() || '';
+            if (!html || html.search(/(<input|<select|nbsp;)/i) >= 0) {
+                return;
+            }
+
+            node.css('cursor', 'help').click(function() {
+                $('#' + helpId).toggle('slow');
+            });
+        });
+    });
+}
+
+// Deferred: Unraid registers its own ready handler after this one, so a plain
+// ready callback would run first and double-bind everything it then pins.
+$(function() { setTimeout(function() { docktailBindHelp(); }, 0); });
+</script>
+        <?php
     return (string) ob_get_clean();
 }

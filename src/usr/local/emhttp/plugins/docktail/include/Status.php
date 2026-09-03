@@ -438,6 +438,18 @@ final class Status
 <?php } ?>
 
 <table class="unraid tablesorter"><thead><tr><td>Containers</td></tr></thead></table>
+<blockquote class="inline_help">
+    Every running container carrying a <code>docktail.*</code> label, joined against what
+    <code>tailscaled</code> currently advertises.
+    <strong>Service</strong> is the tailnet name (<code>svc:&lt;name&gt;</code>) taken from
+    <code>docktail.service.name</code>; <strong>Container port</strong> is the port inside the
+    container that traffic is proxied to.
+    <strong>Advertised</strong> means <code>tailscaled</code> is serving that Service right now
+    &mdash; a cross here with DockTail running usually means the Service definition does not
+    exist in your tailnet, this node is not tagged, or the reconcile interval has not elapsed
+    yet. A tick while DockTail is <em>Stopped</em> means something else advertised it: another
+    DockTail instance, or a leftover from <em>Skip shutdown cleanup</em>.
+</blockquote>
 
 <?php if ($snapshot['rows'] === []) { ?>
 <div class="docktail-remedy">
@@ -460,18 +472,6 @@ final class Status
 </tbody>
 </table>
 <?php } ?>
-<blockquote class="inline_help">
-    Every running container carrying a <code>docktail.*</code> label, joined against what
-    <code>tailscaled</code> currently advertises.
-    <strong>Service</strong> is the tailnet name (<code>svc:&lt;name&gt;</code>) taken from
-    <code>docktail.service.name</code>; <strong>Container port</strong> is the port inside the
-    container that traffic is proxied to.
-    <strong>Advertised</strong> means <code>tailscaled</code> is serving that Service right now
-    &mdash; a cross here with DockTail running usually means the Service definition does not
-    exist in your tailnet, this node is not tagged, or the reconcile interval has not elapsed
-    yet. A tick while DockTail is <em>Stopped</em> means something else advertised it: another
-    DockTail instance, or a leftover from <em>Skip shutdown cleanup</em>.
-</blockquote>
 
 <?php if (($snapshot['serveStatusPlain'] ?? '') !== '') { ?>
 <div class="docktail-remedy">
@@ -554,49 +554,21 @@ function docktailControl(action) {
     setTimeout(docktailRefresh, 8000);
 }
 
-/*
- * Unraid wires click-to-toggle help once, at page load (BodyInlineJS). This tab
- * replaces its own body over AJAX, so the replacement blocks arrive unwired.
- * Re-apply the same rule Unraid uses: pin each blockquote.inline_help to the
- * label of the preceding dl (or the first row of the preceding table).
- */
-function docktailBindHelp() {
-    var showing = $('.nav-item.HelpButton').hasClass('active');
-
-    $('#docktail_status blockquote.inline_help').each(function(i) {
-        var help = $(this).attr('id', 'docktailhelp' + i);
-        if (showing) {
-            help.show();
-        }
-
-        var pin = help.prev();
-        while (pin.prop('nodeName') && pin.prop('nodeName').search(/(table|dl)/i) == -1) {
-            pin = pin.prev();
-        }
-        if (!pin.prop('nodeName')) {
-            return;
-        }
-
-        pin.find('tr:first,dt:last').each(function() {
-            var node = $(this);
-            if (!node.html() || node.html().search(/(<input|<select|nbsp;)/i) >= 0) {
-                return;
-            }
-            node.css('cursor', 'help').click(function() {
-                $('#docktailhelp' + i).toggle('slow');
-            });
-        });
-    });
-}
-
 function docktailRefresh() {
     $.post('/plugins/docktail/status.php', {csrf_token: '<?= h($token); ?>'}, function(data) {
         $('#docktail_status').html(data.html);
-        docktailBindHelp();
+
+        // The replacement fragment arrives unwired, and Unraid's page-load
+        // wiring cannot reach it. Rebind, and respect the global Help toggle so
+        // a refresh does not collapse help the user had open.
+        docktailBindHelp('#docktail_status');
+        if ($('.nav-item.HelpButton').hasClass('active')) {
+            $('#docktail_status blockquote.inline_help').show();
+        }
     }, 'json');
 }
 </script>
         <?php
-        return (string) ob_get_clean();
+        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
     }
 }

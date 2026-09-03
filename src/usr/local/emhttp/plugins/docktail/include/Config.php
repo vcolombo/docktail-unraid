@@ -413,6 +413,6 @@ final class Config
 
 </form>
         <?php
-        return (string) ob_get_clean();
+        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
     }
 }
