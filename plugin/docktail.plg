@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03.6"
+  version="2026.09.03.7"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,16 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.7
+
+Reworks the Labels tab.
+
+- Picking a container now prefills a suggested service name, lists the ports it exposes, and loads any DockTail labels it already carries so you edit rather than start over.
+- The output is the complete Extra Parameters value: your existing arguments with only the DockTail labels replaced. Paste over the whole field instead of merging by hand.
+- Basic/Advanced split - four fields by default, the rest behind Unraid's Advanced View switch.
+- Regenerates as you type, and validation errors appear in their own block instead of inside the output box.
+- Copy now confirms itself and uses the modern clipboard API.
 
 ### 2026.09.03.6
 
@@ -34,20 +44,14 @@ Condenses the DockTail view.
 - Each preflight check shows its mark and path on a single line.
 - Drops the redundant SERVICE heading under DOCKTAIL and tightens row spacing.
 
-### 2026.09.03.4
-
-Cleans up the plugin pages.
-
-The plugin no longer opens on a DockTail tab that duplicated the Status tab. Following the official Tailscale plugin, the container page now carries the primary view, so the tabs are DockTail | Settings | Labels and the opening screen is the service state, preflight checks and container list.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.6-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.6/docktail-unraid-2026.09.03.6-noarch-1.txz</URL>
-<SHA256>463bc9cbe95b2aa913f4c0e2a13b786330d0a2c5f712938c3321061ac9eef921</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.7-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.7/docktail-unraid-2026.09.03.7-noarch-1.txz</URL>
+<SHA256>0bfadf98f9b60b1bbfc7a5527cf61d8d262fa8fd116be95a5e46129c4e1165c7</SHA256>
 </FILE>
 
 <!--
@@ -62,7 +66,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.6-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.7-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -84,12 +88,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.6')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.7')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03.6"
+echo " Plugin version:   2026.09.03.7"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
