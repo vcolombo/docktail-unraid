@@ -83,9 +83,17 @@ re-advertises them once Docker is back.
 ```
 
 Releases are cut by creating a GitHub Release whose **tag and name are both**
-`YYYY.MM.DD` (append `.N` for a second release the same day); letters break Slackware
-package versioning and Unraid's `version_compare` update check. Mark it as a
-pre-release to publish only the `-preview` channel.
+`YYYY.MM.DD`. For a second release the same day, append a **zero-padded**
+counter: `.01`, `.02`, … `.10`. Mark it as a pre-release to publish only the
+`-preview` channel.
+
+The padding is load-bearing. Unraid compares third-party plugin versions with
+**`strcmp`**, not `version_compare` — see `strcmp($latest,$version) > 0` in
+`dynamix.plugin.manager/include/ShowPlugins.php` and the same in
+`scripts/plugincheck`. So `2026.09.03.10` is *string-older* than
+`2026.09.03.9` and the update is never offered, even though it is numerically
+newer. Unpadded counters work only up to `.9`. Letters are also out, because
+they break Slackware package versioning.
 
 ## Documentation
 
