@@ -31,20 +31,19 @@ require_once PLUGIN_ROOT . '/include/Status.php';
 require_once PLUGIN_ROOT . '/include/Labels.php';
 
 /**
- * Reject any request that does not carry the webGUI's CSRF token. Both POST
- * endpoints call this before touching the filesystem or the rc script.
+ * The webGUI's CSRF token, for the hidden field every POST form must carry.
+ *
+ * The plugin does NOT re-validate it. Unraid checks CSRF centrally in
+ * dynamix/include/local_prepend.php, which php.ini installs as
+ * auto_prepend_file, so it runs before any endpoint here: a POST with a
+ * missing or wrong token is rejected with 403 before our code is reached.
+ *
+ * Crucially, that prepend then does `unset($_POST['csrf_token'])`. A second
+ * check here therefore always fails - the token is gone by design - and with a
+ * form targeting the hidden progressFrame the 403 is invisible, so Apply
+ * appears to do nothing. Emitting the field is still required: without it the
+ * prepend rejects the request as "missing csrf_token".
  */
-function requireCsrf(): void
-{
-    $var   = @parse_ini_file('/var/local/emhttp/var.ini');
-    $token = is_array($var) ? ($var['csrf_token'] ?? '') : '';
-
-    if ($token === '' || ! isset($_POST['csrf_token']) || ! hash_equals((string) $token, (string) $_POST['csrf_token'])) {
-        http_response_code(403);
-        die('Invalid CSRF token');
-    }
-}
-
 function csrfToken(): string
 {
     $var = @parse_ini_file('/var/local/emhttp/var.ini');
@@ -91,7 +90,7 @@ function docktailVersion(): string
 }
 
 /**
- * Click-to-toggle wiring for this plugin's help blocks.
+ * Stylesheet link plus click-to-toggle wiring for this plugin's help blocks.
  *
  * Unraid does this itself in DefaultPageLayout/BodyInlineJS.php, but only for
  * markup present at page load, and only when the pinned row contains a <td> -
@@ -103,9 +102,15 @@ function docktailVersion(): string
  * same label would toggle the block twice per click, which looks exactly like
  * help being broken.
  */
-function helpScript(): string
+function pageAssets(): string
 {
+    // Cache-bust on file mtime, so a plugin update never leaves a browser on
+    // the previous stylesheet.
+    $css = '/plugins/' . PLUGIN_NAME . '/style.css';
+    $mtime = @filemtime(PLUGIN_ROOT . '/style.css');
+
     ob_start(); ?>
+<link type="text/css" rel="stylesheet" href="<?= h($css . ($mtime ? '?v=' . $mtime : '')); ?>">
 <script>
 function docktailBindHelp(scope) {
     var root = scope ? $(scope) : $('.docktail-help-scope');

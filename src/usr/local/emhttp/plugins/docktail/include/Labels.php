@@ -563,6 +563,6 @@ function docktailCopy() {
 }
 </script>
         <?php
-        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
+        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . pageAssets();
     }
 }

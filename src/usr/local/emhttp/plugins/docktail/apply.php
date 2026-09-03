@@ -21,7 +21,8 @@ namespace DockTail;
 
 require_once '/usr/local/emhttp/plugins/docktail/include/common.php';
 
-requireCsrf();
+// CSRF is already enforced by Unraid's auto_prepend_file (local_prepend.php),
+// which rejects a bad token with 403 and strips the field from $_POST.
 
 header('Content-Type: text/plain; charset=utf-8');
 

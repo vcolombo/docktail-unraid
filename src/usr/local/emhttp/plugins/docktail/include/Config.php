@@ -234,7 +234,7 @@ final class Config
         $yesNo = ['1' => 'Yes', '0' => 'No'];
 
         ob_start(); ?>
-<form method="POST" action="/plugins/docktail/apply.php" target="progressFrame">
+<form method="POST" id="docktail_settings" action="/plugins/docktail/apply.php" onsubmit="docktailApply();return false;">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
 <input type="hidden" name="action" value="save">
 
@@ -405,14 +405,44 @@ final class Config
 
 <dl>
     <dt>&nbsp;</dt>
-    <dd>
+    <dd class="docktail-inline">
         <input type="submit" name="#apply" value="Apply">
         <input type="button" value="Done" onclick="done()">
+        <span id="docktail_apply_result" class="docktail-apply-result"></span>
     </dd>
 </dl>
 
 </form>
+
+<script>
+/*
+ * Submitted over AJAX rather than into the hidden progressFrame, so the outcome
+ * is actually visible: a settings write that fails server-side used to be
+ * indistinguishable from one that worked.
+ *
+ * serialize() keeps the hidden csrf_token field, which Unraid's
+ * auto_prepend_file requires on every POST.
+ */
+function docktailApply() {
+    var form = $('#docktail_settings');
+    var out = $('#docktail_apply_result');
+
+    out.removeClass('docktail-apply-error').text('Saving...');
+
+    $.post(form.attr('action'), form.serialize())
+        .done(function(data) {
+            out.text($.trim(String(data)) || 'Settings saved.');
+            form.find('input[value="Apply"]').prop('disabled', true);
+        })
+        .fail(function(xhr) {
+            var detail = xhr.status === 403
+                ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
+                : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+            out.addClass('docktail-apply-error').text('Could not save: ' + detail);
+        });
+}
+</script>
         <?php
-        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
+        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . pageAssets();
     }
 }

@@ -523,52 +523,6 @@ final class Status
         $token = csrfToken();
 
         ob_start(); ?>
-<style>
-/* Remedies must always be readable. Unraid's blockquote.inline_help is hidden
-   until the user clicks the label or toggles Help, which is right for
-   explanatory text but wrong for what to do about a failing check. */
-.docktail-remedy {
-    margin: 2px 0 2px 18px;
-    padding: 0;
-    color: #ff8c2f;
-    font-style: italic;
-}
-.docktail-remedy code {
-    font-style: normal;
-}
-.docktail-detail {
-    opacity: 0.75;
-}
-
-/* Unraid stacks dd content: `dd { display:flex; flex-direction:column }` above
-   769px. That is right for stacked form controls, but it puts a check mark and
-   its path on separate lines and turns a button row into a button column. */
-.docktail-help-scope dd.docktail-inline {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: .5rem;
-}
-
-/* Unraid's own `input:not([type="submit"])` rule also matches button inputs and
-   caps them at 400px, which is why these stretched across the page. */
-.docktail-help-scope dd.docktail-inline input[type="button"],
-.docktail-help-scope dd.docktail-inline input[type="submit"] {
-    width: auto;
-    max-width: none;
-}
-
-/* Tighter rows, so the checks scan as a list rather than a form. Scoped to this
-   view: every tab shares one DOM, and Settings and Labels are real forms that
-   want Unraid's default spacing. */
-#docktail_status dl {
-    padding: .35rem 0;
-}
-#docktail_status dl + dl {
-    margin-top: 0;
-}
-</style>
-
 <table class="unraid tablesorter"><thead><tr><td>DockTail</td></tr></thead></table>
 <blockquote class="inline_help">
     DockTail watches Docker containers, reads <code>docktail.*</code> labels, and exposes
@@ -611,6 +565,6 @@ function docktailRefresh() {
 }
 </script>
         <?php
-        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
+        return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . pageAssets();
     }
 }
