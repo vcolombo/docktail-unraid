@@ -126,7 +126,13 @@ covers DockTail itself and says nothing about this plugin.
 
 ## License
 
-AGPL-3.0, matching the DockTail binary this plugin ships. DockTail is
-copyright its upstream author, [marvinvr](https://github.com/marvinvr); the
-Unraid packaging in this repository is copyright
-[vcolombo](https://github.com/vcolombo). Both are AGPL-3.0.
+AGPL-3.0, matching the DockTail binary this plugin ships — upstream is AGPL-3.0,
+so anything conveying its compiled form must be too. DockTail is copyright its
+upstream author, [marvinvr](https://github.com/marvinvr); the Unraid packaging in
+this repository is copyright [vcolombo](https://github.com/vcolombo).
+
+The package installs `LICENSE` and `SOURCE` alongside the binary in
+`/usr/local/emhttp/plugins/docktail`. `SOURCE` records the upstream repository,
+tag and **exact commit** the shipped binary was built from, which is what
+AGPL-3.0 section 6 asks for: a user holding the binary can always find the
+source it came from.
