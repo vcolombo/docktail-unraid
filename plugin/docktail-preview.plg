@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail-preview"
   author="vcolombo"
-  version="2026.09.03.3"
+  version="2026.09.03.4"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail-preview.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,12 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.4
+
+Cleans up the plugin pages.
+
+The plugin no longer opens on a DockTail tab that duplicated the Status tab. Following the official Tailscale plugin, the container page now carries the primary view, so the tabs are DockTail | Settings | Labels and the opening screen is the service state, preflight checks and container list.
 
 ### 2026.09.03.3
 
@@ -31,21 +37,14 @@ Adds clickable per-field help across all four tabs, matching the native Unraid p
 - The Status tab re-wires help after its AJAX refresh and honours an already-active Help toggle.
 - Remedies for failing checks remain visible without clicking.
 
-### 2026.09.03.1
-
-Fixes two Status tab rendering bugs:
-
-- Check remedies were invisible (Unraid hides inline_help until Help is toggled), so a failing check rendered an empty row. Remedies are now always visible.
-- Start/Stop/Restart/Refresh rendered stacked full-width above the page; they now sit directly under the service state.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.3-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.3/docktail-unraid-2026.09.03.3-noarch-1.txz</URL>
-<SHA256>ba93e18cc5578b320c208708ecd990a16e5de3083e40f4edfd9d71d339777b27</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.4-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.4/docktail-unraid-2026.09.03.4-noarch-1.txz</URL>
+<SHA256>ea828fe186a8bc9f3f4f42560a231afb41f773ffbf3aa4010199258945fa5592</SHA256>
 </FILE>
 
 <!--
@@ -60,7 +59,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.3-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.4-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -82,12 +81,12 @@ rm -f /var/log/plugins/docktail.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.3')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.4')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail-preview has been installed."
-echo " Plugin version:   2026.09.03.3"
+echo " Plugin version:   2026.09.03.4"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
