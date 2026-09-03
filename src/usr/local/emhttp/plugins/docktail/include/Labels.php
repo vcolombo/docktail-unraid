@@ -942,11 +942,38 @@ function docktailGenerate() {
     }, 150);
 }
 
+/*
+ * Pristine field values, snapshotted once so switching containers can return
+ * the form to a known state. Without this, values from the previously selected
+ * container survive - the visible symptom being a service name that does not
+ * follow the dropdown, and the subtler one being a stale advanced value (tags,
+ * direct, a path) silently emitted for the newly selected container.
+ */
+var docktailDefaults = {};
+
+function docktailSnapshotDefaults() {
+    $('#docktail_labels').find('input,select,textarea').each(function() {
+        var name = $(this).attr('name');
+        if (name && name !== 'csrf_token' && name !== 'container') {
+            docktailDefaults[name] = $(this).val();
+        }
+    });
+}
+
+function docktailResetForm() {
+    $.each(docktailDefaults, function(name, value) {
+        $('#docktail_labels [name="' + name + '"]').val(value);
+    });
+}
+
 function docktailLoadContainer() {
     var name = $('#docktail_container').val();
     var note = $('#docktail_container_note');
 
     if (!name) {
+        docktailResetForm();
+        $('#docktail_ports').empty();
+        $('#docktail_port_note').text('');
         note.text('');
         docktailGenerate();
         return;
@@ -958,6 +985,10 @@ function docktailLoadContainer() {
         container: name
     }, function(data) {
         var ports = data.ports || [];
+
+        // The form always describes the container that is selected now.
+        docktailResetForm();
+
         $('#docktail_ports').html($.map(ports, function(p) {
             return '<option value="' + p + '"></option>';
         }).join(''));
@@ -977,10 +1008,11 @@ function docktailLoadContainer() {
             });
             note.text('Loaded existing DockTail labels.');
         } else {
-            if (!$('#docktail_service_name').val()) {
-                $('#docktail_service_name').val(data.suggestName || '');
-            }
-            if (!$('#docktail_service_port').val() && ports.length === 1) {
+            $('#docktail_service_name').val(data.suggestName || '');
+
+            // Only unambiguous when the container exposes exactly one port;
+            // otherwise leave it for the user to pick from the dropdown.
+            if (ports.length === 1) {
                 $('#docktail_service_port').val(ports[0]);
             }
             note.text('');
@@ -1020,6 +1052,9 @@ function docktailCopy() {
 }
 
 $(function() {
+    // Before anything can alter them.
+    docktailSnapshotDefaults();
+
     var advanced = $.cookie ? $.cookie('docktail_labels_view') === 'advanced' : false;
 
     // Fall back to a plain checkbox if the switch plugin is unavailable, rather
