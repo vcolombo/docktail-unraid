@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03.7"
+  version="2026.09.03.8"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,12 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.8
+
+Fixes the exposed-port list on the Labels tab.
+
+A container publishing a port range printed every number, running to several lines. Consecutive runs now collapse (e.g. `50000-50100`) and the list is capped with a '+N more' tail; the port dropdown still offers every individual port.
 
 ### 2026.09.03.7
 
@@ -36,22 +42,14 @@ Apply appeared to do nothing and changes were lost on reload. Unraid validates t
 - Apply reports its outcome next to the button instead of posting into a hidden frame.
 - Generate and Refresh work again.
 
-### 2026.09.03.5
-
-Condenses the DockTail view.
-
-- The four service control buttons now sit on one line at their natural size instead of stacking full-width.
-- Each preflight check shows its mark and path on a single line.
-- Drops the redundant SERVICE heading under DOCKTAIL and tightens row spacing.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.7-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.7/docktail-unraid-2026.09.03.7-noarch-1.txz</URL>
-<SHA256>0bfadf98f9b60b1bbfc7a5527cf61d8d262fa8fd116be95a5e46129c4e1165c7</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.8-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.8/docktail-unraid-2026.09.03.8-noarch-1.txz</URL>
+<SHA256>899951e0d25351e390b139e160beada9f65bd4df770996898f9c38bb7bebf208</SHA256>
 </FILE>
 
 <!--
@@ -66,7 +64,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.7-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.8-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -88,12 +86,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.7')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.8')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03.7"
+echo " Plugin version:   2026.09.03.8"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
