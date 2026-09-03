@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CommunityApplications>
-  <Profile>DockTail for Unraid — expose Docker containers as native Tailscale Services from docktail.* container labels.</Profile>
+  <Profile>DockTail for Unraid — expose Docker containers as native Tailscale Services from docktail.* container labels, without giving each app its own Tailscale device. This repository maintains the DockTail plugin; DockTail itself is developed by marvinvr (https://github.com/marvinvr/docktail). Support and bug reports: https://github.com/vcolombo/docktail-unraid/issues</Profile>
   <Icon>https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/icon.png</Icon>
   <WebPage>https://github.com/vcolombo/docktail-unraid</WebPage>
 </CommunityApplications>
