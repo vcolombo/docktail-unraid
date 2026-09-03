@@ -57,3 +57,9 @@
 #docktail_status dl + dl {
     margin-top: 0;
 }
+
+/* Local hidden class: dockerMan's `.noshow` lives in its own stylesheet and is
+   not available to other plugins. */
+.docktail-hidden {
+    display: none;
+}

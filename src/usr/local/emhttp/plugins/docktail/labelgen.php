@@ -23,16 +23,45 @@ require_once '/usr/local/emhttp/plugins/docktail/include/common.php';
 
 // CSRF is already enforced by Unraid's auto_prepend_file (local_prepend.php).
 
-header('Content-Type: text/plain; charset=utf-8');
+header('Content-Type: application/json; charset=utf-8');
 
-$result = Labels::build($_POST);
+$container = trim((string) ($_POST['container'] ?? ''));
 
-if (is_array($result)) {
-    foreach ($result as $error) {
-        echo '# ' . $error . "\n";
-    }
+switch ((string) ($_POST['action'] ?? 'generate')) {
+    case 'load':
+        // Picking a container: report what it already has so the form can be
+        // populated instead of filled in from memory.
+        $info = Labels::containerInfo($container);
 
-    return;
+        echo json_encode([
+            'found'       => $info['found'],
+            'values'      => Labels::formValues($info['labels']),
+            'labelled'    => $info['labels'] !== [],
+            'ports'       => $info['ports'],
+            'hasTemplate' => $info['hasTemplate'],
+            'suggestName' => Labels::suggestName($container),
+        ], JSON_UNESCAPED_SLASHES);
+        break;
+
+    default:
+        $result = Labels::build($_POST);
+
+        if (is_array($result)) {
+            echo json_encode(['errors' => $result, 'labels' => '', 'extraParams' => ''], JSON_UNESCAPED_SLASHES);
+            break;
+        }
+
+        // The paste target is the whole Extra Parameters field, so hand back the
+        // container's existing arguments with its DockTail labels replaced.
+        // Anything else the user set there is preserved byte for byte.
+        $info     = Labels::containerInfo($container);
+        $existing = $info['extraParams'];
+
+        echo json_encode([
+            'errors'      => [],
+            'labels'      => $result,
+            'extraParams' => Labels::mergeExtraParams($existing, $result),
+            'merged'      => $info['hasTemplate'] && Labels::stripDocktailLabels($existing) !== '',
+            'hasTemplate' => $info['hasTemplate'],
+        ], JSON_UNESCAPED_SLASHES);
 }
-
-echo $result . "\n";

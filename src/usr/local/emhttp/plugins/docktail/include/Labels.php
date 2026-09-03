@@ -278,6 +278,285 @@ final class Labels
         return $names;
     }
 
+    public const TEMPLATE_DIR = '/boot/config/plugins/dockerMan/templates-user';
+
+    /**
+     * Everything the form needs about one container: the docktail.* labels it
+     * already carries, the ports it exposes, and the Extra Parameters its
+     * dockerMan template holds.
+     *
+     * @return array{found: bool, labels: array<string, string>, ports: list<string>, extraParams: string, hasTemplate: bool}
+     */
+    public static function containerInfo(string $name): array
+    {
+        $info = ['found' => false, 'labels' => [], 'ports' => [], 'extraParams' => '', 'hasTemplate' => false];
+
+        if ($name === '' || ! file_exists(Status::DOCKER_SOCK) || ! file_exists(Status::DOCKER_BIN)) {
+            return $info;
+        }
+
+        // One inspect call: labels, the ports declared by the image, and the
+        // published-port map (which also covers ports published without being
+        // declared EXPOSE).
+        $format = '{{json .Config.Labels}}' . "\t" . '{{json .Config.ExposedPorts}}' . "\t" . '{{json .NetworkSettings.Ports}}';
+        $out    = [];
+        $code   = 1;
+        @exec(
+            escapeshellarg(Status::DOCKER_BIN) . ' inspect --format ' . escapeshellarg($format) . ' ' . escapeshellarg($name) . ' 2>/dev/null',
+            $out,
+            $code
+        );
+        if ($code !== 0 || $out === []) {
+            return $info;
+        }
+
+        $parts = explode("\t", implode('', $out));
+        if (count($parts) < 3) {
+            return $info;
+        }
+
+        $info['found'] = true;
+
+        $labels = json_decode($parts[0], true);
+        if (is_array($labels)) {
+            foreach ($labels as $key => $value) {
+                if (str_starts_with((string) $key, 'docktail.')) {
+                    $info['labels'][(string) $key] = (string) $value;
+                }
+            }
+        }
+
+        $ports = [];
+        foreach ([json_decode($parts[1], true), json_decode($parts[2], true)] as $set) {
+            if ( ! is_array($set)) {
+                continue;
+            }
+            foreach (array_keys($set) as $spec) {
+                // "8080/tcp" -> "8080"; UDP is not something Tailscale serves.
+                [$port, $proto] = array_pad(explode('/', (string) $spec, 2), 2, 'tcp');
+                if ($proto === 'tcp' && preg_match('/^\d+$/', $port) === 1) {
+                    $ports[$port] = true;
+                }
+            }
+        }
+        $info['ports'] = array_map('strval', array_keys($ports));
+        sort($info['ports'], SORT_NUMERIC);
+
+        $template = self::templateFor($name);
+        if ($template !== null) {
+            $info['hasTemplate'] = true;
+            $info['extraParams'] = $template;
+        }
+
+        return $info;
+    }
+
+    /**
+     * The ExtraParams string from the container's dockerMan template, or null
+     * when no template matches. Read-only: the plugin never writes these files,
+     * because dockerMan only applies a template change by stopping and removing
+     * the container.
+     */
+    private static function templateFor(string $name): ?string
+    {
+        foreach ((array) @glob(self::TEMPLATE_DIR . '/*.xml') as $file) {
+            $xml = @simplexml_load_file($file);
+            if ($xml === false) {
+                continue;
+            }
+            if (trim((string) ($xml->Name ?? '')) !== $name) {
+                continue;
+            }
+
+            return trim(html_entity_decode((string) ($xml->ExtraParams ?? ''), ENT_QUOTES | ENT_XML1, 'UTF-8'));
+        }
+
+        return null;
+    }
+
+    /**
+     * Split an Extra Parameters string into tokens, keeping each token's byte
+     * offsets and treating quoted spans as part of the token they belong to.
+     *
+     * Offsets matter: removal splices the original string, so every argument we
+     * do not touch survives byte for byte - including the user's own spacing.
+     *
+     * @return list<array{text: string, start: int, end: int}>
+     */
+    public static function tokenizeParams(string $params): array
+    {
+        $tokens = [];
+        $len    = strlen($params);
+        $i      = 0;
+
+        while ($i < $len) {
+            if (ctype_space($params[$i])) {
+                $i++;
+                continue;
+            }
+
+            $start = $i;
+            $quote = '';
+            for (; $i < $len; $i++) {
+                $c = $params[$i];
+
+                if ($quote !== '') {
+                    if ($c === '\\' && $quote === '"' && $i + 1 < $len) {
+                        $i++;
+                        continue;
+                    }
+                    if ($c === $quote) {
+                        $quote = '';
+                    }
+                    continue;
+                }
+                if ($c === '"' || $c === "'") {
+                    $quote = $c;
+                    continue;
+                }
+                if (ctype_space($c)) {
+                    break;
+                }
+            }
+
+            $tokens[] = ['text' => substr($params, $start, $i - $start), 'start' => $start, 'end' => $i];
+        }
+
+        return $tokens;
+    }
+
+    private static function dequote(string $value): string
+    {
+        $len = strlen($value);
+        if ($len >= 2 && ($value[0] === '"' || $value[0] === "'") && $value[$len - 1] === $value[0]) {
+            $inner = substr($value, 1, -1);
+
+            return $value[0] === '"' ? str_replace(['\\"', '\\\\'], ['"', '\\'], $inner) : $inner;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Remove every `--label docktail.*` argument and leave everything else
+     * untouched. Handles the two-token form, the `--label=k=v` form, and quoted
+     * values containing spaces.
+     */
+    public static function stripDocktailLabels(string $params): string
+    {
+        $tokens = self::tokenizeParams($params);
+        $cuts   = [];
+
+        for ($i = 0, $n = count($tokens); $i < $n; $i++) {
+            $text = $tokens[$i]['text'];
+
+            if ($text === '--label' || $text === '-l') {
+                if ($i + 1 < $n && str_starts_with(self::dequote($tokens[$i + 1]['text']), 'docktail.')) {
+                    $cuts[] = [$tokens[$i]['start'], $tokens[$i + 1]['end']];
+                    $i++;
+                }
+                continue;
+            }
+
+            foreach (['--label=', '-l='] as $prefix) {
+                if (str_starts_with($text, $prefix)
+                    && str_starts_with(self::dequote(substr($text, strlen($prefix))), 'docktail.')) {
+                    $cuts[] = [$tokens[$i]['start'], $tokens[$i]['end']];
+                    break;
+                }
+            }
+        }
+
+        // Splice back to front so earlier offsets stay valid.
+        $result = $params;
+        foreach (array_reverse($cuts) as [$from, $to]) {
+            $result = substr($result, 0, $from) . substr($result, $to);
+        }
+
+        // Only collapse whitespace that the removal itself created.
+        return trim((string) preg_replace('/[ \t]{2,}/', ' ', $result));
+    }
+
+    /**
+     * The full value to paste into Extra Parameters: the container's existing
+     * arguments with its DockTail labels replaced by the generated ones.
+     */
+    public static function mergeExtraParams(string $existing, string $labels): string
+    {
+        $kept = self::stripDocktailLabels($existing);
+
+        if ($kept === '') {
+            return $labels;
+        }
+        if ($labels === '') {
+            return $kept;
+        }
+
+        return $kept . ' ' . $labels;
+    }
+
+    /**
+     * Turn a container's existing docktail.* labels back into form values, so a
+     * labelled container is edited rather than described from memory.
+     *
+     * @param  array<string, string> $labels
+     * @return array<string, string>
+     */
+    public static function formValues(array $labels): array
+    {
+        $map = [
+            'docktail.service.enable'           => 'service_enable',
+            'docktail.service.name'             => 'service_name',
+            'docktail.service.port'             => 'service_port',
+            'docktail.service.protocol'         => 'service_protocol',
+            'docktail.service.service-protocol' => 'service_service_protocol',
+            'docktail.service.service-port'     => 'service_service_port',
+            'docktail.service.path'             => 'service_path',
+            'docktail.service.proxy-protocol'   => 'service_proxy_protocol',
+            'docktail.service.description'      => 'service_description',
+            'docktail.service.direct'           => 'service_direct',
+            'docktail.service.network'          => 'service_network',
+            'docktail.tags'                     => 'tags',
+            'docktail.funnel.enable'            => 'funnel_enable',
+            'docktail.funnel.port'              => 'funnel_port',
+            'docktail.funnel.funnel-port'       => 'funnel_funnel_port',
+            'docktail.funnel.protocol'          => 'funnel_protocol',
+            'docktail.funnel.path'              => 'funnel_path',
+        ];
+
+        $values = [];
+        foreach ($map as $label => $field) {
+            if ( ! array_key_exists($label, $labels)) {
+                continue;
+            }
+            $value = $labels[$label];
+
+            // The selects are 1/0; the labels are true/false.
+            if (in_array($field, ['service_enable', 'funnel_enable'], true)) {
+                $value = $value === 'true' ? '1' : '0';
+            } elseif ($field === 'service_direct') {
+                $value = $value === 'false' ? '0' : '1';
+            }
+
+            $values[$field] = $value;
+        }
+
+        return $values;
+    }
+
+    /**
+     * A service name suggestion derived from the container name: Tailscale
+     * Service names allow only letters, digits and hyphens.
+     */
+    public static function suggestName(string $containerName): string
+    {
+        $name = strtolower($containerName);
+        $name = (string) preg_replace('/[^a-z0-9-]+/', '-', $name);
+        $name = trim((string) preg_replace('/-{2,}/', '-', $name), '-');
+
+        return $name;
+    }
+
     /**
      * Labels tab.
      */
@@ -287,35 +566,47 @@ final class Labels
         $containers = self::containerNames();
 
         ob_start(); ?>
+<!-- Unraid does not load these globally; its own pages that use the switch
+     control pull them in the same way (see dynamix/WG0.page). -->
+<link type="text/css" rel="stylesheet" href="/webGui/styles/jquery.switchbutton.css">
+<script src="/webGui/javascript/jquery.switchbutton.js"></script>
+
+<span class="status vhshift"><input type="checkbox" class="advancedview"></span>
 <table class="unraid tablesorter"><thead><tr><td>Label Builder</td></tr></thead></table>
 
 <blockquote class="inline_help">
-    Unraid's container editor has no label field. Fill this in, then paste the
-    generated string into <em>Docker &rarr; container &rarr; Advanced View &rarr;
-    Extra Parameters &rarr; Apply</em>. This page only generates text; it never
-    edits or recreates your containers.
+    Unraid's container editor has no label field, so DockTail is configured with
+    container labels that go in <em>Extra Parameters</em>. Pick a container and this
+    builds the whole field value for you, preserving any other arguments already set
+    there.
     <br><br>
-    Click any field name to read what it does. The Help button in the header toggles all of
-    them at once.
+    Paste it into <em>Docker &rarr; container &rarr; Advanced View &rarr; Extra
+    Parameters</em> and Apply. This page only generates text; it never edits or
+    recreates your containers.
+    <br><br>
+    Click any field name to read what it does. Switch to <em>Advanced View</em> for the
+    rest of the options.
 </blockquote>
 
-<form id="docktail_labels" onsubmit="docktailGenerate();return false;">
+<form id="docktail_labels">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
 
 <dl>
     <dt>Container:</dt>
     <dd>
-        <select name="container" size="1">
+        <select name="container" id="docktail_container" size="1">
             <option value="">-- pick a container --</option>
 <?php foreach ($containers as $name) { ?>
             <option value="<?= h($name); ?>"><?= h($name); ?></option>
 <?php } ?>
         </select>
+        <span id="docktail_container_note" class="docktail-apply-result"></span>
     </dd>
 </dl>
 <blockquote class="inline_help">
-    Only used to remind you where the labels go &mdash; the generated string is
-    identical for every container.
+    Picking a container fills in a suggested service name, lists the ports it exposes,
+    and loads any <code>docktail.*</code> labels it already carries &mdash; so an
+    already-enrolled container is edited rather than described again from scratch.
 </blockquote>
 
 <dl>
@@ -334,20 +625,44 @@ final class Labels
 
 <dl>
     <dt>Service name:</dt>
-    <dd><input type="text" name="service_name" placeholder="unraid-test"></dd>
+    <dd><input type="text" name="service_name" id="docktail_service_name" placeholder="unraid-test"></dd>
 </dl>
 <blockquote class="inline_help">
     Becomes <code>svc:&lt;name&gt;</code> on the tailnet and is reachable at
-    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>.
+    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>. Letters, digits and hyphens only.
 </blockquote>
 
 <dl>
     <dt>Container port:</dt>
-    <dd><input type="text" name="service_port" placeholder="80" class="narrow"></dd>
+    <dd>
+        <input type="text" name="service_port" id="docktail_service_port" placeholder="80" class="narrow" list="docktail_ports">
+        <datalist id="docktail_ports"></datalist>
+        <span id="docktail_port_note" class="docktail-apply-result"></span>
+    </dd>
 </dl>
 <blockquote class="inline_help">
-    The port the application listens on inside the container.
+    The port the application listens on inside the container. The list is populated from
+    the ports the chosen container exposes or publishes.
 </blockquote>
+
+<dl>
+    <dt>Enable Funnel:</dt>
+    <dd>
+        <select name="funnel_enable" id="docktail_funnel_enable" size="1" class="narrow">
+            <option value="0" selected>No</option>
+            <option value="1">Yes</option>
+        </select>
+    </dd>
+</dl>
+<blockquote class="inline_help">
+    Exposes the container to the <strong>public internet</strong>, not just your tailnet.
+    Also requires "Allow Funnel" in the Tailscale plugin, otherwise it removes DockTail's
+    Funnel entries.
+</blockquote>
+
+<div class="advanced">
+
+<table class="unraid tablesorter"><thead><tr><td>Service (advanced)</td></tr></thead></table>
 
 <dl>
     <dt>Container protocol:</dt>
@@ -459,25 +774,11 @@ final class Labels
     Comma-separated. Overrides the default service tags from the Settings tab.
 </blockquote>
 
-<table class="unraid tablesorter"><thead><tr><td>Funnel (public internet)</td></tr></thead></table>
-
-<dl>
-    <dt>Enable Funnel:</dt>
-    <dd>
-        <select name="funnel_enable" size="1" class="narrow">
-            <option value="0" selected>No</option>
-            <option value="1">Yes</option>
-        </select>
-    </dd>
-</dl>
-<blockquote class="inline_help">
-    Exposes the container to the public internet. Also requires "Allow Funnel"
-    in the Tailscale plugin, otherwise it removes DockTail's Funnel entries.
-</blockquote>
+<table class="unraid tablesorter"><thead><tr><td>Funnel (advanced)</td></tr></thead></table>
 
 <dl>
     <dt>Funnel container port:</dt>
-    <dd><input type="text" name="funnel_port" class="narrow"></dd>
+    <dd><input type="text" name="funnel_port" class="narrow" list="docktail_ports"></dd>
 </dl>
 <blockquote class="inline_help">
     The port inside the container that Funnel traffic is proxied to. Required when Funnel is
@@ -525,42 +826,172 @@ final class Labels
     protocol is rejected, because a TCP forward has no URL to match a path against.
 </blockquote>
 
-<dl>
-    <dt>&nbsp;</dt>
-    <dd><input type="submit" value="Generate"></dd>
-</dl>
+</div>
 </form>
 
+<table class="unraid tablesorter"><thead><tr><td>Extra Parameters</td></tr></thead></table>
+
+<div id="docktail_labels_errors" class="docktail-remedy docktail-hidden"></div>
+
 <dl>
-    <dt>Extra Parameters:</dt>
-    <dd><textarea id="docktail_labels_out" rows="5" cols="80" readonly></textarea></dd>
+    <dt>Paste into Extra Parameters:</dt>
+    <dd>
+        <textarea id="docktail_labels_out" rows="5" cols="80" readonly spellcheck="false"></textarea>
+        <span id="docktail_merge_note" class="docktail-apply-result"></span>
+    </dd>
 </dl>
 <blockquote class="inline_help">
-    The generated label string. Paste it into
-    <em>Docker &rarr; container &rarr; Advanced View &rarr; Extra Parameters</em>, then Apply
-    &mdash; Unraid will recreate the container with the labels attached.
+    The complete value for the container's <em>Extra Parameters</em> field: its existing
+    arguments with the DockTail labels replaced. Replace the whole field with this, then
+    Apply &mdash; Unraid recreates the container with the labels attached.
     <br><br>
-    Only non-default keys appear here, so the string stays short enough to read back later. If
-    the box fills with lines starting <code>#</code>, those are validation errors, not labels.
+    Only non-default label keys are emitted, so the string stays short enough to read back
+    later. If the container has no dockerMan template, only the labels are shown and you
+    should append them to whatever the field already contains.
 </blockquote>
+
 <dl>
     <dt>&nbsp;</dt>
-    <dd><input type="button" value="Copy" onclick="docktailCopy()"></dd>
+    <dd class="docktail-inline">
+        <input type="button" value="Copy" onclick="docktailCopy()">
+        <span id="docktail_copy_note" class="docktail-apply-result"></span>
+    </dd>
 </dl>
 
 <script>
+var docktailGenTimer = null;
+
+/* Regenerated on every change: a Generate button meant the box could sit there
+   showing a value that no longer matched the form. */
 function docktailGenerate() {
-    $.post('/plugins/docktail/labelgen.php', $('#docktail_labels').serialize(), function(data) {
-        $('#docktail_labels_out').val(data);
-    });
+    clearTimeout(docktailGenTimer);
+    docktailGenTimer = setTimeout(function() {
+        $.post('/plugins/docktail/labelgen.php', $('#docktail_labels').serialize() + '&action=generate', function(data) {
+            var errors = $('#docktail_labels_errors');
+
+            if (data.errors && data.errors.length) {
+                // Errors are shown separately: emitting them into the output box
+                // made an invalid config look pasteable.
+                errors.html(data.errors.join('<br>')).removeClass('docktail-hidden');
+                $('#docktail_labels_out').val('');
+                return;
+            }
+
+            errors.addClass('docktail-hidden').empty();
+            $('#docktail_labels_out').val(data.extraParams || '');
+            // Written to its own element: the container picker's note reports the
+            // load, and a regeneration must not wipe it.
+            $('#docktail_merge_note').text(data.merged
+                ? 'Existing Extra Parameters preserved.'
+                : (data.hasTemplate ? '' : 'No dockerMan template found; labels only.'));
+        }, 'json');
+    }, 150);
+}
+
+function docktailLoadContainer() {
+    var name = $('#docktail_container').val();
+    var note = $('#docktail_container_note');
+
+    if (!name) {
+        note.text('');
+        docktailGenerate();
+        return;
+    }
+
+    $.post('/plugins/docktail/labelgen.php', {
+        csrf_token: $('#docktail_labels input[name="csrf_token"]').val(),
+        action: 'load',
+        container: name
+    }, function(data) {
+        var ports = data.ports || [];
+        $('#docktail_ports').html($.map(ports, function(p) {
+            return '<option value="' + p + '"></option>';
+        }).join(''));
+        $('#docktail_port_note').text(ports.length ? 'Exposes: ' + ports.join(', ') : 'No TCP ports detected.');
+
+        if (data.labelled) {
+            // Load what the container already declares, so this is an edit.
+            $.each(data.values, function(field, value) {
+                var el = $('#docktail_labels [name="' + field + '"]');
+                if (el.length) {
+                    el.val(value);
+                }
+            });
+            note.text('Loaded existing DockTail labels.');
+        } else {
+            if (!$('#docktail_service_name').val()) {
+                $('#docktail_service_name').val(data.suggestName || '');
+            }
+            if (!$('#docktail_service_port').val() && ports.length === 1) {
+                $('#docktail_service_port').val(ports[0]);
+            }
+            note.text('');
+        }
+
+        docktailGenerate();
+    }, 'json');
 }
 
 function docktailCopy() {
-    var out = document.getElementById('docktail_labels_out');
-    out.select();
-    document.execCommand('copy');
-    out.setSelectionRange(0, 0);
+    var text = $('#docktail_labels_out').val();
+    var note = $('#docktail_copy_note');
+
+    if (!text) {
+        note.text('Nothing to copy.');
+        return;
+    }
+
+    var fallback = function() {
+        var el = document.getElementById('docktail_labels_out');
+        el.select();
+        var ok = document.execCommand('copy');
+        el.setSelectionRange(0, 0);
+        note.text(ok ? 'Copied.' : 'Copy failed - select the text and copy manually.');
+    };
+
+    // execCommand is deprecated and silent; prefer the async API and keep it
+    // only as a fallback for non-secure contexts.
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(function() {
+            note.text('Copied.');
+        }, fallback);
+    } else {
+        fallback();
+    }
+    setTimeout(function() { note.text(''); }, 4000);
 }
+
+$(function() {
+    var advanced = $.cookie ? $.cookie('docktail_labels_view') === 'advanced' : false;
+
+    // Fall back to a plain checkbox if the switch plugin is unavailable, rather
+    // than leaving the advanced fields unreachable.
+    if ($.fn.switchButton) {
+        $('.advancedview').switchButton({
+            labels_placement: 'left',
+            on_label: 'Advanced View',
+            off_label: 'Basic View',
+            checked: advanced
+        });
+    } else {
+        $('.advancedview').prop('checked', advanced);
+    }
+
+    $('.advanced').toggle(advanced);
+
+    $('.advancedview').change(function() {
+        var on = $('.advancedview').is(':checked');
+        $('.advanced').toggle(on, 'slow');
+        if ($.cookie) {
+            $.cookie('docktail_labels_view', on ? 'advanced' : 'basic', {expires: 3650});
+        }
+    });
+
+    $('#docktail_container').change(docktailLoadContainer);
+    $('#docktail_labels').find('input,select,textarea').not('#docktail_container').on('input change', docktailGenerate);
+
+    docktailGenerate();
+});
 </script>
         <?php
         return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . pageAssets();
