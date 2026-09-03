@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03.4"
+  version="2026.09.03.5"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,14 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.5
+
+Condenses the DockTail view.
+
+- The four service control buttons now sit on one line at their natural size instead of stacking full-width.
+- Each preflight check shows its mark and path on a single line.
+- Drops the redundant SERVICE heading under DOCKTAIL and tightens row spacing.
 
 ### 2026.09.03.4
 
@@ -28,23 +36,14 @@ Fixes clickable help not working: no label showed the help cursor.
 
 The feature relied on Unraid's page-load help wiring, which refuses to pin a table row lacking a <td> (so the Containers block got no pin) and only ever sees markup present at load. The plugin now wires its own help on every tab, deferring so it never double-binds on top of Unraid's wiring, and the Status tab rebinds after its AJAX refresh.
 
-### 2026.09.03.2
-
-Adds clickable per-field help across all four tabs, matching the native Unraid pattern: click any field name to toggle its explanation, or use the Help button in the header to toggle all of them.
-
-- 47 help blocks covering every setting, preflight check, container column and version field.
-- OAuth client ID and secret now have separate help; the Funnel fields, service protocol and generated-output box gained help they were missing.
-- The Status tab re-wires help after its AJAX refresh and honours an already-active Help toggle.
-- Remedies for failing checks remain visible without clicking.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.4-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.4/docktail-unraid-2026.09.03.4-noarch-1.txz</URL>
-<SHA256>ea828fe186a8bc9f3f4f42560a231afb41f773ffbf3aa4010199258945fa5592</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.5-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.5/docktail-unraid-2026.09.03.5-noarch-1.txz</URL>
+<SHA256>7c3d8a8356be7e9071cdd1a3862d56602216269d5d54c4f7927460ddcfb946a3</SHA256>
 </FILE>
 
 <!--
@@ -59,7 +58,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.4-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.5-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -81,12 +80,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.4')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.5')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03.4"
+echo " Plugin version:   2026.09.03.5"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
