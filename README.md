@@ -52,6 +52,12 @@ Example: expose a container listening on port 80 as `svc:unraid-test`:
 --label docktail.service.enable=true --label docktail.service.name=unraid-test --label docktail.service.port=80
 ```
 
+`docktail.funnel.*` labels additionally require **Allow Funnel** in the Tailscale
+plugin's own settings. While that is off, the Tailscale plugin strips Funnel entries
+out of the serve config it shares with DockTail, silently removing the Funnels
+DockTail created. The DockTail tab checks this, but only once a container asks for a
+Funnel.
+
 ## Tabs
 
 | Tab | What it does |
@@ -69,6 +75,12 @@ Example: expose a container listening on port 80 as `svc:unraid-test`:
 | Service script | `/usr/local/etc/rc.d/rc.docktail` |
 | Binary | `/usr/local/emhttp/plugins/docktail/bin/docktail` |
 | Log | `/var/log/docktail.log` |
+
+Every key in `docktail.cfg` and `credentials.cfg` maps 1:1 onto the DockTail
+environment variable of the same name, except `ENABLE_DOCKTAIL`, which is
+plugin-local and only gates the service script. Empty values are not exported, so
+DockTail's own defaults apply. Both files survive plugin removal, following the
+Unraid convention that plugin settings persist.
 
 The service is bound to the Docker lifecycle through the `docker_started` and
 `stopping_docker` events, so DockTail withdraws its Services before Docker stops and
@@ -105,9 +117,12 @@ they break Slackware package versioning.
 
 ## Documentation
 
+- [DockTail documentation](https://docktail.org) — labels, protocols, Tailscale admin setup
 - [DockTail upstream source (marvinvr/docktail)](https://github.com/marvinvr/docktail)
-- [DockTail documentation](https://docktail.org)
-- [Unraid installation](https://docktail.org/#installation)
+
+Unraid-specific setup is documented here, in this README and in the plugin's own help
+text: every field on all three tabs is clickable and explains itself. docktail.org
+covers DockTail itself and says nothing about this plugin.
 
 ## License
 
