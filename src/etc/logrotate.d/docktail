@@ -1,0 +1,8 @@
+/var/log/docktail.log {
+   compress
+   daily
+   rotate 4
+   notifempty
+   missingok
+   copytruncate
+}

@@ -1,0 +1,104 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN>
+
+{% set pluginDirectory = "/usr/local/emhttp/plugins/" ~ name -%}
+{% set configDirectory = "/boot/config/plugins/" ~ name -%}
+{% set packageFile = package_name ~ "-" ~ env['PLUGIN_VERSION'] ~ "-noarch-1.txz" -%}
+{% if env['PLUGIN_RELEASE'] == "-preview" -%}
+{% set otherChannel = name -%}
+{% else -%}
+{% set otherChannel = name ~ "-preview" -%}
+{% endif %}
+
+<PLUGIN
+  name="{{ name }}{{ env['PLUGIN_RELEASE'] }}"
+  author="{{ author }}"
+  version="{{ env['PLUGIN_VERSION'] }}"
+  launch="{{ launch }}"
+  pluginURL="https://raw.githubusercontent.com/{{ env['GITHUB_REPOSITORY'] }}/main/plugin/{{ name }}{{ env['PLUGIN_RELEASE'] }}.plg"
+  support="{{ support }}"
+  min="{{ min }}"
+>
+
+<CHANGES>
+<![CDATA[
+{{ env['PLUGIN_CHANGELOG'] }}
+
+For older releases, see https://github.com/{{ env['GITHUB_REPOSITORY'] }}/releases
+]]>
+</CHANGES>
+
+<FILE Name="{{ configDirectory }}/{{ packageFile }}">
+<URL>https://github.com/{{ env['GITHUB_REPOSITORY'] }}/releases/download/{{ env['PLUGIN_VERSION'] }}/{{ packageFile }}</URL>
+<SHA256>{{ env['PLUGIN_CHECKSUM'] }}</SHA256>
+</FILE>
+
+<!--
+The 'install' script. Unraid re-installs every /boot/config/plugins/*.plg on
+boot, so this runs at boot too: it must be idempotent and must not fail when
+Docker or Tailscale are still down.
+-->
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+if [ -d "{{ pluginDirectory }}" ]; then
+    rm -rf {{ pluginDirectory }}
+fi
+
+upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
+
+mkdir -p {{ configDirectory }}
+
+# Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
+# repo at /boot/.git.
+echo "credentials.cfg" > {{ configDirectory }}/.gitignore
+
+if [ ! -f "{{ configDirectory }}/credentials.cfg" ]; then
+    install -m 0600 /dev/null {{ configDirectory }}/credentials.cfg
+fi
+chmod 0600 {{ configDirectory }}/credentials.cfg
+
+# Drop the other release channel so both are never installed at once.
+rm -f /boot/config/plugins/{{ otherChannel }}.plg
+rm -f /var/log/plugins/{{ otherChannel }}.plg
+
+# Start (or restart) the daemon. Deferred, so a blocking Unraid event returns
+# immediately.
+{{ pluginDirectory }}/restart.sh
+
+# Clean up superseded packages.
+rm -f $(ls {{ configDirectory }}/{{ package_name }}-*.txz 2>/dev/null | grep -v '{{ env['PLUGIN_VERSION'] }}')
+
+echo ""
+echo "----------------------------------------------------"
+echo " {{ name }}{{ env['PLUGIN_RELEASE'] }} has been installed."
+echo " Plugin version:   {{ env['PLUGIN_VERSION'] }}"
+echo " DockTail version: {{ docktailVersion }}"
+echo ""
+echo " Configure it under Settings -> Network Services ->"
+echo " DockTail. DockTail needs the Tailscale plugin and a"
+echo " tagged Unraid node; the Status tab checks both."
+echo "----------------------------------------------------"
+echo ""
+]]>
+</INLINE>
+</FILE>
+
+<!--
+The 'remove' script. Settings under {{ configDirectory }} are left in place:
+Unraid convention is that plugin settings survive removal.
+-->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+/usr/local/etc/rc.d/rc.docktail stop 2>/dev/null
+
+removepkg {{ package_name }}
+
+rm -rf {{ pluginDirectory }}
+rm -f {{ configDirectory }}/*.txz
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

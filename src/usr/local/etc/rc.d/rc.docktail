@@ -1,0 +1,157 @@
+#!/bin/bash
+# /usr/local/etc/rc.d/rc.docktail - start/stop the DockTail daemon
+#
+# DockTail runs as a native host daemon here, not in a container: it then gets
+# an exactly version-matched tailscale CLI/tailscaled pair from the official
+# Tailscale plugin, and 127.0.0.1 is the right proxy target for host-networked
+# Unraid containers.
+
+PLUGIN_ROOT="/usr/local/emhttp/plugins/docktail"
+CONFIG_DIR="/boot/config/plugins/docktail"
+BIN="${PLUGIN_ROOT}/bin/docktail"
+LOG="/var/log/docktail.log"
+PIDFILE="/var/run/docktail.pid"
+DOCKER_SOCK="/var/run/docker.sock"
+TAILSCALED_SOCK="/var/run/tailscale/tailscaled.sock"
+PGREP="/usr/bin/pgrep"
+PKILL="/usr/bin/pkill"
+
+# Seconds to wait for a graceful drain before SIGKILL. Must exceed DockTail's
+# own 30s shutdown cleanup context: cutting it short leaves stale Tailscale
+# Services advertised on the tailnet.
+STOP_TIMEOUT=35
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
+}
+
+load_config() {
+  # Defaults first, user settings on top, then secrets. All three files are
+  # plain KEY="value", safe to source.
+  [ -f "${PLUGIN_ROOT}/default.cfg" ] && . "${PLUGIN_ROOT}/default.cfg"
+  [ -f "${CONFIG_DIR}/docktail.cfg" ] && . "${CONFIG_DIR}/docktail.cfg"
+  [ -f "${CONFIG_DIR}/credentials.cfg" ] && . "${CONFIG_DIR}/credentials.cfg"
+  return 0
+}
+
+# export_if_set NAME VALUE - skip empty values so DockTail's own defaults and
+# its credential warnings behave as designed.
+export_if_set() {
+  [ -n "$2" ] && export "$1"="$2"
+  return 0
+}
+
+is_running() {
+  "$PGREP" --ns $$ --euid root -f "^${BIN}" 1> /dev/null 2> /dev/null
+}
+
+start_docktail() {
+  load_config
+
+  if [ "${ENABLE_DOCKTAIL}" != "1" ]; then
+    log "DockTail is disabled in settings, not starting."
+    return 0
+  fi
+
+  if [ ! -x "$BIN" ]; then
+    log "Binary $BIN is missing, not starting."
+    return 0
+  fi
+
+  # Normal state during the boot-time .plg re-install: the array (and Docker)
+  # is not up yet. The docker_started event starts us later.
+  if [ ! -S "$DOCKER_SOCK" ]; then
+    log "Docker socket ${DOCKER_SOCK} is not present, not starting."
+    return 0
+  fi
+
+  if [ ! -S "$TAILSCALED_SOCK" ]; then
+    log "tailscaled socket ${TAILSCALED_SOCK} is not present (is the Tailscale plugin running?), not starting."
+    return 0
+  fi
+
+  if is_running; then
+    log "DockTail is already running."
+    return 0
+  fi
+
+  # DockTail resolves the tailscale CLI from PATH; the Tailscale plugin
+  # symlinks it into /usr/local/sbin.
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+  export_if_set RECONCILE_INTERVAL "${RECONCILE_INTERVAL}"
+  export_if_set LOG_LEVEL "${LOG_LEVEL}"
+  export_if_set TAILSCALE_TAILNET "${TAILSCALE_TAILNET}"
+  export_if_set DEFAULT_SERVICE_TAGS "${DEFAULT_SERVICE_TAGS}"
+  export_if_set IGNORE_SERVICE_NAMES "${IGNORE_SERVICE_NAMES}"
+  export_if_set DELETE_UNUSED_SERVICES "${DELETE_UNUSED_SERVICES}"
+  export_if_set SKIP_SHUTDOWN_CLEANUP "${SKIP_SHUTDOWN_CLEANUP}"
+  export_if_set TAILSCALE_OAUTH_CLIENT_ID "${TAILSCALE_OAUTH_CLIENT_ID}"
+  export_if_set TAILSCALE_OAUTH_CLIENT_SECRET "${TAILSCALE_OAUTH_CLIENT_SECRET}"
+  export_if_set TAILSCALE_API_KEY "${TAILSCALE_API_KEY}"
+  export_if_set DOCKTAIL_CLOUD_KEY "${DOCKTAIL_CLOUD_KEY}"
+
+  log "Starting DockTail: $BIN"
+  nohup "$BIN" >> "$LOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  return 0
+}
+
+stop_docktail() {
+  if ! is_running; then
+    log "DockTail is not running."
+    rm -f "$PIDFILE"
+    return 0
+  fi
+
+  log "Stopping DockTail, waiting up to ${STOP_TIMEOUT}s for service cleanup."
+  "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+
+  local waited=0
+  while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
+    if ! is_running; then
+      log "DockTail stopped after ${waited}s."
+      rm -f "$PIDFILE"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  log "DockTail did not exit within ${STOP_TIMEOUT}s, sending SIGKILL (advertised services may be left behind)."
+  "$PKILL" --ns $$ --euid root -KILL -f "^${BIN}" 2> /dev/null
+  rm -f "$PIDFILE"
+  return 0
+}
+
+restart_docktail() {
+  stop_docktail
+  sleep 1
+  start_docktail
+}
+
+status_docktail() {
+  if is_running; then
+    echo "Running"
+  else
+    echo "Stopped"
+  fi
+}
+
+case "$1" in
+'start')
+  start_docktail
+  ;;
+'stop')
+  stop_docktail
+  ;;
+'restart')
+  restart_docktail
+  ;;
+'status')
+  status_docktail
+  ;;
+*)
+  echo "usage $0 start|stop|restart|status"
+  ;;
+esac

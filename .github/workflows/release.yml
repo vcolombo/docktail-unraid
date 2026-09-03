@@ -1,0 +1,19 @@
+name: Release
+
+on:
+  release:
+    types: [prereleased, released, published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: dkaser/unraid-plugin-release-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          plg_branch: main
+          go_dir: docktail
+          build_script: ./build.sh
+          build_prereleases: true

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: docktail/go.mod
+          cache-dependency-path: docktail/go.sum
+
+      # Proves the pinned DockTail source still cross-compiles and stages the
+      # package tree exactly as the release action will.
+      - name: Build package tree
+        run: ./build.sh
+
+      - name: Shell syntax
+        run: |
+          bash -n src/usr/local/etc/rc.d/rc.docktail \
+                  src/install/doinst.sh \
+                  build.sh \
+                  bump.sh \
+                  src/usr/local/emhttp/plugins/docktail/restart.sh \
+                  src/usr/local/emhttp/plugins/docktail/stop.sh
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: PHP syntax
+        run: |
+          find src \( -name '*.php' -o -name '*.page' \) -print0 | xargs -0 -n1 php -l
+
+      - name: XML well-formedness
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libxml2-utils
+          xmllint --noout ca_profile.xml plugins/docktail.xml
+
+      - name: Staged tree contents
+        run: |
+          find src -type f | sort
+          file src/usr/local/emhttp/plugins/docktail/bin/docktail
+          cat src/usr/local/emhttp/plugins/docktail/VERSION

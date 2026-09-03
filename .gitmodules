@@ -1,0 +1,3 @@
+[submodule "docktail"]
+	path = docktail
+	url = https://github.com/marvinvr/docktail.git

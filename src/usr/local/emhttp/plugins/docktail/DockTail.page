@@ -1,0 +1,18 @@
+Menu="NetworkServices"
+Icon="docktail.png"
+Title="DockTail"
+Type="xmenu"
+Tabs="true"
+Markdown="false"
+---
+<?php
+
+try {
+    $docroot = $docroot ?? $_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp';
+    require_once "{$docroot}/plugins/docktail/include/common.php";
+    echo DockTail\renderOverview();
+} catch (Throwable $e) {
+    echo "An error occurred: <pre>" . htmlspecialchars($e->getMessage(), ENT_QUOTES) . "</pre>";
+}
+
+?>

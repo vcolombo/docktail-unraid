@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Plugin>
+  <Name>DockTail</Name>
+  <Overview>DockTail watches Docker containers, reads docktail.* labels, and exposes matching containers as native Tailscale Services — HTTP, HTTPS, TCP, TLS-terminated TCP and Funnel — without giving each app its own Tailscale device. Requires the Tailscale plugin and a tagged Unraid node.</Overview>
+  <PluginURL>https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg</PluginURL>
+  <PluginAuthor>vcolombo</PluginAuthor>
+  <Project>https://docktail.org</Project>
+  <ReadMe>https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/README.md</ReadMe>
+  <Category>Network:Management</Category>
+  <Icon>https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/icon.png</Icon>
+  <License>AGPLv3</License>
+</Plugin>

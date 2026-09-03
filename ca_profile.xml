@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CommunityApplications>
+  <Profile>DockTail for Unraid — expose Docker containers as native Tailscale Services from docktail.* container labels.</Profile>
+  <Icon>https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/icon.png</Icon>
+  <WebPage>https://docktail.org</WebPage>
+</CommunityApplications>

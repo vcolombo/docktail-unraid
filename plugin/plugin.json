@@ -1,0 +1,9 @@
+{
+  "name": "docktail",
+  "package_name": "docktail-unraid",
+  "author": "vcolombo",
+  "min": "7.0.0",
+  "support": "https://github.com/vcolombo/docktail-unraid/issues",
+  "launch": "Settings/DockTail",
+  "docktailVersion": "1.7.9"
+}

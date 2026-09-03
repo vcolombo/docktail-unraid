@@ -1,0 +1,11 @@
+               |-----handy-ruler------------------------------------------------------|
+docktail-unraid: docktail-unraid (expose Docker containers as Tailscale Services)
+docktail-unraid:
+docktail-unraid: DockTail watches Docker containers, reads docktail.* labels, and
+docktail-unraid: exposes matching containers as native Tailscale Services.
+docktail-unraid:
+docktail-unraid: Homepage: https://docktail.org
+docktail-unraid:
+docktail-unraid:
+docktail-unraid:
+docktail-unraid:
