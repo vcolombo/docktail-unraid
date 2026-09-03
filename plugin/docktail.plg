@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03"
+  version="2026.09.03.1"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,13 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.1
+
+Fixes two Status tab rendering bugs:
+
+- Check remedies were invisible (Unraid hides inline_help until Help is toggled), so a failing check rendered an empty row. Remedies are now always visible.
+- Start/Stop/Restart/Refresh rendered stacked full-width above the page; they now sit directly under the service state.
 
 ### 2026.09.03
 
@@ -29,9 +36,9 @@ For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03/docktail-unraid-2026.09.03-noarch-1.txz</URL>
-<SHA256>00ac3da01f135f7ca4a14ce8ef3798585c66981904100449e2bf66720df87800</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.1-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.1/docktail-unraid-2026.09.03.1-noarch-1.txz</URL>
+<SHA256>8e8380ecfaffba6a9b6e8ae22038ea10d75eb239ada945e34bd832c7ae2cbbad</SHA256>
 </FILE>
 
 <!--
@@ -46,7 +53,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.1-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -68,12 +75,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.1')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03"
+echo " Plugin version:   2026.09.03.1"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
