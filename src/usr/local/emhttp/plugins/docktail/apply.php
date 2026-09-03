@@ -52,10 +52,18 @@ switch ($action) {
     case 'restart':
         // Direct, not deferred: an explicit stop must wait for DockTail to
         // withdraw its Tailscale Services before the request returns.
+        //
+        // rc.docktail allows a 35s drain, which exceeds the default execution
+        // limit, so raise it. Without this a slow stop could be cut off
+        // mid-drain, leaving Services advertised with nothing behind them.
+        @set_time_limit(60);
+
         $output = [];
         $code   = 1;
         @exec(escapeshellarg(RC_SCRIPT) . ' ' . escapeshellarg($action) . ' 2>&1', $output, $code);
-        echo "rc.docktail {$action}: " . Status::serviceState() . "\n";
+
+        // First line is what the page shows, so make it the answer.
+        echo 'DockTail is now ' . strtolower(Status::serviceState()) . ".\n";
         if ($output !== []) {
             echo implode("\n", $output) . "\n";
         }

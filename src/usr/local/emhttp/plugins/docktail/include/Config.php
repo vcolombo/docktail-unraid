@@ -431,7 +431,7 @@ function docktailApply() {
 
     $.post(form.attr('action'), form.serialize())
         .done(function(data) {
-            out.text($.trim(String(data)) || 'Settings saved.');
+            out.text(String(data).trim() || 'Settings saved.');
             form.find('input[value="Apply"]').prop('disabled', true);
         })
         .fail(function(xhr) {

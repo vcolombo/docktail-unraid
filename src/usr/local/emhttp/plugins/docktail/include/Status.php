@@ -390,16 +390,17 @@ final class Status
     <code>docker_started</code> event.
 </blockquote>
 
-<form method="POST" id="docktail_control" action="/plugins/docktail/apply.php" target="progressFrame">
+<form method="POST" id="docktail_control" action="/plugins/docktail/apply.php">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
 <input type="hidden" name="action" id="docktail_action" value="restart">
 <dl>
     <dt>Service controls:</dt>
     <dd class="docktail-inline">
-        <input type="button" value="Start" onclick="docktailControl('start')">
-        <input type="button" value="Stop" onclick="docktailControl('stop')">
-        <input type="button" value="Restart" onclick="docktailControl('restart')">
-        <input type="button" value="Refresh" onclick="docktailRefresh()">
+        <input type="button" class="docktail-control" value="Start" onclick="docktailControl('start')">
+        <input type="button" class="docktail-control" value="Stop" onclick="docktailControl('stop')">
+        <input type="button" class="docktail-control" value="Restart" onclick="docktailControl('restart')">
+        <input type="button" class="docktail-control" value="Refresh" onclick="docktailRefresh()">
+        <span id="docktail_control_note" class="docktail-apply-result"></span>
     </dd>
 </dl>
 <blockquote class="inline_help">
@@ -542,15 +543,52 @@ final class Status
 <div id="docktail_status"><?= self::renderBody(self::snapshot()); ?></div>
 
 <script>
+/*
+ * Submitted over AJAX rather than into the hidden progressFrame. A stop waits
+ * up to 35 seconds for DockTail to withdraw its Services, and posting into a
+ * frame nobody can see made that indistinguishable from a dead button.
+ */
 function docktailControl(action) {
+    var note = $('#docktail_control_note');
+    var buttons = $('.docktail-control');
+    var message = '';
+    var failed = false;
+
+    var progress = {
+        start: 'Starting DockTail...',
+        stop: 'Stopping DockTail - waiting for it to withdraw its Services, up to 35 seconds...',
+        restart: 'Restarting DockTail - the stop waits for Services to withdraw, up to 35 seconds...'
+    };
+
+    note.removeClass('docktail-apply-error').text(progress[action] || 'Working...');
+    buttons.prop('disabled', true);
     $('#docktail_action').val(action);
-    $('#docktail_control').submit();
-    // The rc script waits for a graceful drain, so give it time before the
-    // page re-reads the state.
-    setTimeout(docktailRefresh, 8000);
+
+    $.ajax({
+        url: $('#docktail_control').attr('action'),
+        type: 'POST',
+        data: $('#docktail_control').serialize(),
+        // Comfortably beyond the drain window, so a slow stop is not reported
+        // as a failure while it is still working.
+        timeout: 90000
+    }).done(function(data) {
+        // The endpoint's first line is the answer; the rest is rc output.
+        message = String(data).split('\n')[0].trim() || 'Done.';
+    }).fail(function(xhr) {
+        failed  = true;
+        message = xhr.statusText === 'timeout'
+            ? 'Timed out waiting for the service script. Reload to see the current state.'
+            : 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+    }).always(function() {
+        buttons.prop('disabled', false);
+        // Refresh either way: the action may well have taken effect even if the
+        // request did not come back cleanly. The refresh replaces the fragment
+        // holding this note, so the message has to be re-applied afterwards.
+        docktailRefresh(message, failed);
+    });
 }
 
-function docktailRefresh() {
+function docktailRefresh(message, failed) {
     $.post('/plugins/docktail/status.php', {csrf_token: '<?= h($token); ?>'}, function(data) {
         $('#docktail_status').html(data.html);
 
@@ -560,6 +598,12 @@ function docktailRefresh() {
         docktailBindHelp('#docktail_status');
         if ($('.nav-item.HelpButton').hasClass('active')) {
             $('#docktail_status blockquote.inline_help').show();
+        }
+
+        if (message) {
+            $('#docktail_control_note')
+                .toggleClass('docktail-apply-error', !!failed)
+                .text(message);
         }
     }, 'json');
 }
