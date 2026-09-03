@@ -10,7 +10,7 @@ Markdown="false"
 try {
     $docroot = $docroot ?? $_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp';
     require_once "{$docroot}/plugins/docktail/include/common.php";
-    echo DockTail\renderOverview();
+    echo DockTail\Status::render();
 } catch (Throwable $e) {
     echo "An error occurred: <pre>" . htmlspecialchars($e->getMessage(), ENT_QUOTES) . "</pre>";
 }

@@ -518,7 +518,7 @@ final class Status
     }
 
     /**
-     * Status tab.
+     * The DockTail tab: the plugin's opening view.
      */
     public static function render(): string
     {
@@ -542,6 +542,22 @@ final class Status
     opacity: 0.75;
 }
 </style>
+
+<table class="unraid tablesorter"><thead><tr><td>DockTail</td></tr></thead></table>
+<blockquote class="inline_help">
+    DockTail watches Docker containers, reads <code>docktail.*</code> labels, and exposes
+    matching containers as native Tailscale Services &mdash; without giving each app its own
+    Tailscale device.
+    <br><br>
+    <strong>Settings</strong> holds the credentials and the enable switch, and
+    <strong>Labels</strong> generates the <code>--label</code> string for a container's Extra
+    Parameters field.
+    <br><br>
+    Every field name on these tabs is clickable and explains itself; the Help button in the
+    header toggles all of them at once.
+    <br><br>
+    Full documentation: <a href="https://docktail.org" target="_blank">docktail.org</a>
+</blockquote>
 
 <div id="docktail_status"><?= self::renderBody(self::snapshot()); ?></div>
 

@@ -323,7 +323,7 @@ final class Config
     <br><br>
     These tags must already exist in your tailnet policy file, and your ACLs must permit the
     devices you expect to reach the tagged Services. These are tags on the <em>Service</em>,
-    which are separate from the tags on this Unraid <em>node</em> shown on the Status tab.
+    which are separate from the tags on this Unraid <em>node</em> shown on the DockTail tab.
 </blockquote>
 
 <dl>
@@ -387,7 +387,7 @@ final class Config
     <dd><?= $select('LOG_LEVEL', ['debug' => 'debug', 'info' => 'info', 'warn' => 'warn', 'error' => 'error'], $cfg['LOG_LEVEL'] ?? 'info'); ?></dd>
 </dl>
 <blockquote class="inline_help">
-    Verbosity of <code>/var/log/docktail.log</code>, linked from the Status tab.
+    Verbosity of <code>/var/log/docktail.log</code>, linked from the DockTail tab.
     <code>debug</code> adds the label parsing and defaulting decisions for each container,
     which is what to use when a Service is not advertised and the reason is not obvious.
     Rotated daily, because <code>/var/log</code> is a RAM filesystem.

@@ -91,69 +91,12 @@ function docktailVersion(): string
 }
 
 /**
- * Container page: a one-screen summary plus where to go next.
- */
-function renderOverview(): string
-{
-    $state = Status::serviceState();
-
-    ob_start(); ?>
-<table class="unraid tablesorter"><thead><tr><td>DockTail</td></tr></thead></table>
-
-<blockquote class="inline_help">
-    DockTail watches Docker containers, reads <code>docktail.*</code> labels, and
-    exposes matching containers as native Tailscale Services &mdash; without giving
-    each app its own Tailscale device.
-    <br><br>
-    <strong>Settings</strong> holds the credentials and the enable switch,
-    <strong>Status</strong> checks the environment and shows what is advertised, and
-    <strong>Labels</strong> generates the <code>--label</code> string for a container's
-    Extra Parameters field.
-    <br><br>
-    Every field name on these tabs is clickable and explains itself; the Help button in the
-    header toggles all of them at once.
-    <br><br>
-    Full documentation: <a href="https://docktail.org" target="_blank">docktail.org</a>
-</blockquote>
-
-<dl>
-    <dt>Service:</dt>
-    <dd><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
-</dl>
-<blockquote class="inline_help">
-    Whether the DockTail service is running on this host. It starts only when
-    <em>Enable DockTail</em> is set on the Settings tab and both Docker and
-    <code>tailscaled</code> are up. The Status tab has the full preflight and the controls.
-</blockquote>
-
-<dl>
-    <dt>Plugin version:</dt>
-    <dd><?= h(pluginVersion()); ?></dd>
-</dl>
-<blockquote class="inline_help">
-    Version of this Unraid plugin, dated <code>YYYY.MM.DD</code>. Updated through
-    Plugins or Community Apps, independently of the DockTail version below.
-</blockquote>
-
-<dl>
-    <dt>DockTail version:</dt>
-    <dd><?= h(docktailVersion()); ?></dd>
-</dl>
-<blockquote class="inline_help">
-    Version of the DockTail daemon this plugin ships. The plugin pins one DockTail release
-    and builds it unmodified, so this changes only when the plugin is updated.
-</blockquote>
-    <?php
-    return '<div class="docktail-help-scope">' . (string) ob_get_clean() . '</div>' . helpScript();
-}
-
-/**
  * Click-to-toggle wiring for this plugin's help blocks.
  *
  * Unraid does this itself in DefaultPageLayout/BodyInlineJS.php, but only for
  * markup present at page load, and only when the pinned row contains a <td> -
  * a table whose header row uses <th> is silently skipped. This binder covers
- * what Unraid misses and, on the Status tab, the fragment injected over AJAX.
+ * what Unraid misses and, on the DockTail tab, the fragment injected over AJAX.
  *
  * It defers past Unraid's own ready handler and skips any label Unraid already
  * pinned (it marks those with cursor:help). Binding a second handler to the

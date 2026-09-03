@@ -25,8 +25,8 @@ requireCsrf();
 
 $snapshot = Status::snapshot();
 
-// The rendered fragment travels with the data so the Status tab has exactly one
-// renderer, in PHP, instead of a second copy of it in JavaScript.
+// The rendered fragment travels with the data so the DockTail tab has exactly
+// one renderer, in PHP, instead of a second copy of it in JavaScript.
 header('Content-Type: application/json; charset=utf-8');
 echo json_encode([
     'state'           => $snapshot['state'],

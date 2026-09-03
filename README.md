@@ -26,7 +26,7 @@ credit for DockTail's design and implementation belongs upstream.
   tailscale up --advertise-tags=tag:server --reset
   ```
 
-  `--reset` briefly drops the Tailscale connection. The Status tab checks this for you.
+  `--reset` briefly drops the Tailscale connection. The **DockTail** tab checks this for you.
 - A Tailscale OAuth client (scope `all`) or an API key, so DockTail can create and
   tag Service definitions in the Control Plane.
 
@@ -41,7 +41,7 @@ https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.
 ## Use
 
 1. **Settings** — enter the OAuth credentials, set *Enable DockTail* to *Yes*, Apply.
-2. **Status** — confirm every preflight check passes.
+2. **DockTail** — confirm every preflight check passes.
 3. **Labels** — build the label string for a container, then paste it into
    *Docker → container → Advanced View → Extra Parameters → Apply*. Unraid's container
    editor has no label field, so Extra Parameters is the only route.
@@ -56,8 +56,8 @@ Example: expose a container listening on port 80 as `svc:unraid-test`:
 
 | Tab | What it does |
 |---|---|
+| DockTail | Opening view: service state with Start/Stop/Restart, environment preflight (Tailscale, `tailscaled`, Docker, node tags, credentials, Funnel), and labelled containers joined against what `tailscaled` advertises. |
 | Settings | Credentials, tags, reconcile interval, log level. Credentials are stored separately in a `0600` file that is excluded from Unraid Connect's flash backup. |
-| Status | Service state with Start/Stop/Restart, environment preflight (Tailscale, `tailscaled`, Docker, node tags, credentials, Funnel), and labelled containers joined against what `tailscaled` advertises. |
 | Labels | Generates the `--label` string. It only produces text — it never edits container templates and never recreates containers. |
 
 ## Layout on disk
