@@ -1,8 +1,17 @@
 name: Release
 
+# `published` fires for both stable releases and pre-releases, so it is the only
+# trigger needed. Listing `released` as well spawned a second, concurrent run
+# that raced the first to push the rendered .plg to main and failed
+# non-fast-forward. The action reads the prerelease flag itself.
 on:
   release:
-    types: [prereleased, released, published]
+    types: [published]
+
+# Belt and braces: never let two release runs push plugin files at once.
+concurrency:
+  group: release-plugin-files
+  cancel-in-progress: false
 
 jobs:
   build:
