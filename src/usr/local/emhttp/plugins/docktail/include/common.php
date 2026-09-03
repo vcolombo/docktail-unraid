@@ -100,19 +100,6 @@ function renderOverview(): string
     ob_start(); ?>
 <table class="unraid tablesorter"><thead><tr><td>DockTail</td></tr></thead></table>
 
-<dl>
-    <dt>Service:</dt>
-    <dd><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
-</dl>
-<dl>
-    <dt>Plugin version:</dt>
-    <dd><?= h(pluginVersion()); ?></dd>
-</dl>
-<dl>
-    <dt>DockTail version:</dt>
-    <dd><?= h(docktailVersion()); ?></dd>
-</dl>
-
 <blockquote class="inline_help">
     DockTail watches Docker containers, reads <code>docktail.*</code> labels, and
     exposes matching containers as native Tailscale Services &mdash; without giving
@@ -123,7 +110,38 @@ function renderOverview(): string
     <strong>Labels</strong> generates the <code>--label</code> string for a container's
     Extra Parameters field.
     <br><br>
+    Every field name on these tabs is clickable and explains itself; the Help button in the
+    header toggles all of them at once.
+    <br><br>
     Full documentation: <a href="https://docktail.org" target="_blank">docktail.org</a>
+</blockquote>
+
+<dl>
+    <dt>Service:</dt>
+    <dd><span class="<?= $state === 'Running' ? 'green-text' : 'orange-text'; ?>"><?= h($state); ?></span></dd>
+</dl>
+<blockquote class="inline_help">
+    Whether the DockTail service is running on this host. It starts only when
+    <em>Enable DockTail</em> is set on the Settings tab and both Docker and
+    <code>tailscaled</code> are up. The Status tab has the full preflight and the controls.
+</blockquote>
+
+<dl>
+    <dt>Plugin version:</dt>
+    <dd><?= h(pluginVersion()); ?></dd>
+</dl>
+<blockquote class="inline_help">
+    Version of this Unraid plugin, dated <code>YYYY.MM.DD</code>. Updated through
+    Plugins or Community Apps, independently of the DockTail version below.
+</blockquote>
+
+<dl>
+    <dt>DockTail version:</dt>
+    <dd><?= h(docktailVersion()); ?></dd>
+</dl>
+<blockquote class="inline_help">
+    Version of the DockTail daemon this plugin ships. The plugin pins one DockTail release
+    and builds it unmodified, so this changes only when the plugin is updated.
 </blockquote>
     <?php
     return (string) ob_get_clean();

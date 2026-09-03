@@ -294,6 +294,9 @@ final class Labels
     generated string into <em>Docker &rarr; container &rarr; Advanced View &rarr;
     Extra Parameters &rarr; Apply</em>. This page only generates text; it never
     edits or recreates your containers.
+    <br><br>
+    Click any field name to read what it does. The Help button in the header toggles all of
+    them at once.
 </blockquote>
 
 <form id="docktail_labels" onsubmit="docktailGenerate();return false;">
@@ -324,6 +327,10 @@ final class Labels
         </select>
     </dd>
 </dl>
+<blockquote class="inline_help">
+    Whether to expose this container on your tailnet as a Tailscale Service. Set this to No
+    and enable Funnel below to publish a container to the public internet only.
+</blockquote>
 
 <dl>
     <dt>Service name:</dt>
@@ -372,6 +379,15 @@ final class Labels
         </select>
     </dd>
 </dl>
+<blockquote class="inline_help">
+    The protocol Tailscale speaks to <em>clients</em>, as opposed to <em>Container protocol</em>
+    above, which is what your container speaks. Leave it on default and DockTail picks
+    <code>https</code> for service port 443 and <code>http</code> otherwise, or matches the
+    container protocol when that is TCP.
+    <br><br>
+    Use <code>tls-terminated-tcp</code> to have Tailscale hold the TLS certificate and forward
+    plain TCP to the container.
+</blockquote>
 
 <dl>
     <dt>Service port:</dt>
@@ -463,6 +479,11 @@ final class Labels
     <dt>Funnel container port:</dt>
     <dd><input type="text" name="funnel_port" class="narrow"></dd>
 </dl>
+<blockquote class="inline_help">
+    The port inside the container that Funnel traffic is proxied to. Required when Funnel is
+    enabled, and independent of the Service <em>Container port</em> above, so one container can
+    publish a different port to the internet than it does to the tailnet.
+</blockquote>
 
 <dl>
     <dt>Funnel public port:</dt>
@@ -474,6 +495,10 @@ final class Labels
         </select>
     </dd>
 </dl>
+<blockquote class="inline_help">
+    The public-facing port. Tailscale only permits 443, 8443 or 10000 for HTTP and HTTPS
+    funnels; a TCP funnel may use any port.
+</blockquote>
 
 <dl>
     <dt>Funnel protocol:</dt>
@@ -486,11 +511,19 @@ final class Labels
         </select>
     </dd>
 </dl>
+<blockquote class="inline_help">
+    The protocol Funnel serves to the internet. Defaults to <code>https</code>, which is
+    almost always what you want, since Tailscale terminates TLS with a public certificate.
+</blockquote>
 
 <dl>
     <dt>Funnel path:</dt>
     <dd><input type="text" name="funnel_path" placeholder="/"></dd>
 </dl>
+<blockquote class="inline_help">
+    HTTP/HTTPS funnels only; defaults to <code>/</code>. Setting this alongside a TCP funnel
+    protocol is rejected, because a TCP forward has no URL to match a path against.
+</blockquote>
 
 <dl>
     <dt>&nbsp;</dt>
@@ -502,6 +535,14 @@ final class Labels
     <dt>Extra Parameters:</dt>
     <dd><textarea id="docktail_labels_out" rows="5" cols="80" readonly></textarea></dd>
 </dl>
+<blockquote class="inline_help">
+    The generated label string. Paste it into
+    <em>Docker &rarr; container &rarr; Advanced View &rarr; Extra Parameters</em>, then Apply
+    &mdash; Unraid will recreate the container with the labels attached.
+    <br><br>
+    Only non-default keys appear here, so the string stays short enough to read back later. If
+    the box fills with lines starting <code>#</code>, those are validation errors, not labels.
+</blockquote>
 <dl>
     <dt>&nbsp;</dt>
     <dd><input type="button" value="Copy" onclick="docktailCopy()"></dd>
