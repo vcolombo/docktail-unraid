@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail-preview"
   author="vcolombo"
-  version="2026.09.03.9.4"
+  version="2026.09.03.9.5"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail-preview.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,12 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.03.9.5
+
+Labels tab layout fix.
+
+The Enrolment table sat between the page heading and the builder, so on a server with a lot of containers the form you came for was pushed off screen - and the Label Builder heading had nothing visible under it. The builder now comes first and the Enrolment table sits at the end as reference.
 
 ### 2026.09.03.9.4
 
@@ -32,25 +38,14 @@ Labels tab: enrolment view, name warnings, and un-enrolling.
 - Reusing a service name now warns, naming the container that already uses it. Two containers advertising one Service undo each other on every reconcile pass. It is advisory only, since reuse is legitimate when replacing a container.
 - New **Remove DockTail labels** button produces the container's Extra Parameters with the DockTail labels stripped and everything else preserved - the supported way to un-enrol a container.
 
-### 2026.09.03.9.2
-
-Fixes a misleading message after a restart.
-
-Restarting drains every Service, so for up to one reconcile interval afterwards nothing is advertised. The page reported that as "This Tailscale version does not report Services as JSON" - a wrong diagnosis of a normal, temporary state.
-
-- An empty serve config is now recognised as nothing being advertised, not as a Tailscale limitation.
-- When the service is running but Services have not returned yet, the page explains the reconcile delay.
-- Start and Restart now say that Services re-advertise on the next reconcile pass.
-- The raw-output fallback is reserved for output that genuinely cannot be parsed, and says only that.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.4-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.9.4/docktail-unraid-2026.09.03.9.4-noarch-1.txz</URL>
-<SHA256>8076ef87196ae7549e4db87f6086033749e9a5bd7f043c564cc4ba563c519db9</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.9.5/docktail-unraid-2026.09.03.9.5-noarch-1.txz</URL>
+<SHA256>6f1f726b23ae2818a1edfbdd4baee347b1255a1e46028f13a34b47e95d1798c9</SHA256>
 </FILE>
 
 <!--
@@ -65,7 +60,7 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.4-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
 
 mkdir -p /boot/config/plugins/docktail
 
@@ -87,12 +82,12 @@ rm -f /var/log/plugins/docktail.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.9.4')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.9.5')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail-preview has been installed."
-echo " Plugin version:   2026.09.03.9.4"
+echo " Plugin version:   2026.09.03.9.5"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
