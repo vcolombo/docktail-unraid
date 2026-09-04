@@ -733,7 +733,6 @@ final class Labels
 
 <span class="status vhshift"><input type="checkbox" class="advancedview"></span>
 <table class="unraid tablesorter"><thead><tr><td>Label Builder</td></tr></thead></table>
-
 <blockquote class="inline_help">
     Unraid's container editor has no label field, so DockTail is configured with
     container labels that go in <em>Extra Parameters</em>. Pick a container and this
@@ -747,34 +746,6 @@ final class Labels
     Click any field name to read what it does. Switch to <em>Advanced View</em> for the
     rest of the options.
 </blockquote>
-
-<table class="unraid tablesorter"><thead><tr><td>Enrolment</td></tr></thead></table>
-<blockquote class="inline_help">
-    Which running containers carry <code>docktail.*</code> labels. A container with no
-    labels is simply not exposed by DockTail; nothing is wrong with it.
-    <br><br>
-    Pick one below to edit its labels, or to enrol it for the first time.
-</blockquote>
-
-<?php if ($overview === []) { ?>
-<div class="docktail-remedy">
-    No running containers found. Start the array and Docker, then reload.
-</div>
-<?php } else { ?>
-<table class="unraid tablesorter">
-<thead><tr><th>Container</th><th>Service</th><th>Funnel</th><th>Enrolled</th></tr></thead>
-<tbody>
-<?php foreach ($overview as $row) { ?>
-    <tr>
-        <td><?= h($row['name']); ?></td>
-        <td><?= $row['service'] === '' ? '&mdash;' : h($row['service']); ?></td>
-        <td><?= $row['funnel'] ? '<span class="orange-text">yes</span>' : '&mdash;'; ?></td>
-        <td><?= $row['enrolled'] ? '<span class="green-text">&#10004;</span>' : '&mdash;'; ?></td>
-    </tr>
-<?php } ?>
-</tbody>
-</table>
-<?php } ?>
 
 <form id="docktail_labels">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
@@ -1056,6 +1027,36 @@ final class Labels
     no longer asks for it. Whether the Service <em>definition</em> is also deleted from your
     tailnet is governed by <em>Delete unused services</em> on the Settings tab.
 </blockquote>
+
+<table class="unraid tablesorter"><thead><tr><td>Enrolment</td></tr></thead></table>
+<blockquote class="inline_help">
+    Which running containers carry <code>docktail.*</code> labels. A container with no
+    labels is simply not exposed by DockTail; nothing is wrong with it.
+    <br><br>
+    Pick one in <em>Container</em> above to edit its labels, or to enrol it for the
+    first time.
+</blockquote>
+
+<?php if ($overview === []) { ?>
+<div class="docktail-remedy">
+    No running containers found. Start the array and Docker, then reload.
+</div>
+<?php } else { ?>
+<table class="unraid tablesorter">
+<thead><tr><th>Container</th><th>Service</th><th>Funnel</th><th>Enrolled</th></tr></thead>
+<tbody>
+<?php foreach ($overview as $row) { ?>
+    <tr>
+        <td><?= h($row['name']); ?></td>
+        <td><?= $row['service'] === '' ? '&mdash;' : h($row['service']); ?></td>
+        <td><?= $row['funnel'] ? '<span class="orange-text">yes</span>' : '&mdash;'; ?></td>
+        <td><?= $row['enrolled'] ? '<span class="green-text">&#10004;</span>' : '&mdash;'; ?></td>
+    </tr>
+<?php } ?>
+</tbody>
+</table>
+<?php } ?>
+
 
 <script>
 var docktailGenTimer = null;
