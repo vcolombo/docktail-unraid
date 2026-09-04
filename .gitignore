@@ -3,3 +3,7 @@ src/usr/local/emhttp/plugins/docktail/bin/
 src/usr/local/emhttp/plugins/docktail/VERSION
 src/usr/local/emhttp/plugins/docktail/LICENSE
 src/usr/local/emhttp/plugins/docktail/SOURCE
+
+# OS junk (you are on macOS; .DS_Store is a real risk in a public repo)
+.DS_Store
+Thumbs.db
