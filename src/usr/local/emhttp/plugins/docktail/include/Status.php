@@ -310,6 +310,9 @@ final class Status
         }
 
         $list = self::run(escapeshellarg(self::DOCKER_BIN) . " ps --format '{{.ID}} {{.Names}}'");
+        if ($list['code'] !== 0) {
+            return $cache = ['containers' => [], 'inspectionFailed' => true];
+        }
         if ($list['out'] === '') {
             return $cache = $empty;
         }
@@ -513,13 +516,14 @@ final class Status
     backend on demand (up to 20 seconds). Each result has its own status and remedy.
 </blockquote>
 
-<?php if ($snapshot['rows'] === []) { ?>
 <?php if ( ! empty($snapshot['inspectionFailed'])) { ?>
 <div class="docktail-remedy">
     Some running containers could not be inspected, so this list may be incomplete.
     Refresh to retry; if it persists, check that Docker is healthy.
 </div>
-<?php } else { ?>
+<?php } ?>
+<?php if ($snapshot['rows'] === []) { ?>
+<?php if (empty($snapshot['inspectionFailed'])) { ?>
 <div class="docktail-remedy">
     No running container enables a DockTail Service or Funnel. Use the Labels tab to
     generate the labels, then paste them into the container's Extra Parameters field.

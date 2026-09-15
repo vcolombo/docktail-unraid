@@ -146,7 +146,7 @@ final class ConnectionCheck
         $format = '{"id":{{json .Id}},"running":{{json .State.Running}},"labels":{{json .Config.Labels}},'
             . '"mode":{{json .HostConfig.NetworkMode}},"networks":{{json .NetworkSettings.Networks}},'
             . '"bindings":{{json .HostConfig.PortBindings}},"ports":{{json .NetworkSettings.Ports}},'
-            . '"exposed":{{json (index .Config "ExposedPorts")}}}';
+            . '"exposed":{{json .Config.ExposedPorts}}}';
         $info = $this->command([Status::DOCKER_BIN, 'inspect', '--type', 'container', '--format', $format, $container]);
         if ($info === null || ! is_string($info['id'] ?? null)
             || preg_match('/\A[a-f0-9]{64}\z/D', $info['id']) !== 1 || ! str_starts_with($info['id'], $container)) {
