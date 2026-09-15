@@ -304,11 +304,11 @@ final class Status
                 continue;
             }
 
-            $info = Labels::containerInfo($id);
-            if ( ! $info['found']) {
+            $inspect = self::run(escapeshellarg(self::DOCKER_BIN) . ' inspect --format ' . escapeshellarg('{{json .Config.Labels}}') . ' ' . escapeshellarg($id));
+            $labels  = json_decode($inspect['out'], true);
+            if ($inspect['code'] !== 0 || ! is_array($labels)) {
                 continue;
             }
-            $labels = $info['labels'];
 
             $docktailLabels = [];
             foreach ($labels as $key => $value) {
