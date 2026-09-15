@@ -412,11 +412,15 @@ final class ConnectionCheck
             $target === null ? 'Could not derive an unambiguous IPv4 target from current labels and Docker networking.' : self::address($target) . ' derived from current labels and Docker networking.',
             $target === null ? 'Check the selected network or published TCP port. Host networking uses 127.0.0.1; a container with several matching networks needs an explicit network.' : '');
         $port = $endpoint['frontendPort'];
-        $config = $funnel ? $serve : ($serve['Services'][$endpoint['service']] ?? null);
+        $serveReadable = $serve !== null && ( ! isset($serve['Services']) || is_array($serve['Services']));
+        $config = null;
+        if ($serveReadable) {
+            $config = $funnel ? $serve : ($serve['Services'][$endpoint['service']] ?? null);
+        }
         $handler = is_array($config) ? ($config['TCP'][$port] ?? null) : null;
         $actual = null;
         $matches = false;
-        if ($serve === null || (isset($serve['Services']) && ! is_array($serve['Services']))) {
+        if ( ! $serveReadable) {
             $this->add($id . '-local', $title . ' local proxy config', 'unknown', 'Local Serve configuration could not be read within its time/data limit.', 'Check tailscaled and retry.');
         } elseif ( ! is_array($handler)) {
             $this->add($id . '-local', $title . ' local proxy config', 'fail', 'No local frontend on port ' . $port . ' was found for this endpoint.', 'Check the labels and DockTail log; allow the next reconciliation to run.');

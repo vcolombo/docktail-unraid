@@ -58,8 +58,8 @@ final class Labels
         $serviceName = $get('service_name');
         if ($serviceMode && $serviceName === '') {
             $errors[] = 'Service name is required.';
-        } elseif ($serviceName !== '' && preg_match('/^[a-zA-Z0-9-]+$/', $serviceName) !== 1) {
-            $errors[] = 'Service name may only contain letters, digits and hyphens.';
+        } elseif ($serviceName !== '' && preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', $serviceName) !== 1) {
+            $errors[] = 'Service name must be a lowercase DNS label: start and end with a letter or digit, and use only lowercase letters, digits and hyphens.';
         }
 
         $targetPort      = $get('service_port');
@@ -719,7 +719,7 @@ final class Labels
 
     /**
      * A service name suggestion derived from the container name: Tailscale
-     * Service names allow only letters, digits and hyphens.
+     * Service names are lowercase DNS labels (letters, digits and hyphens).
      */
     public static function suggestName(string $containerName): string
     {
@@ -801,7 +801,7 @@ final class Labels
 </dl>
 <blockquote class="inline_help">
     Becomes <code>svc:&lt;name&gt;</code> on the tailnet and is reachable at
-    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>. Letters, digits and hyphens only.
+    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>. Lowercase letters, digits and hyphens only.
 </blockquote>
 
 <table class="unraid tablesorter"><thead><tr><td>Connect to application</td></tr></thead></table>

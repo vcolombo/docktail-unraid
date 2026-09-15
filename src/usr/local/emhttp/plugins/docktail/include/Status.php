@@ -331,10 +331,16 @@ final class Status
 
             $inspect = self::run(escapeshellarg(self::DOCKER_BIN) . ' inspect --format ' . escapeshellarg('{{json .Config.Labels}}') . ' ' . escapeshellarg($id));
             $labels  = json_decode($inspect['out'], true);
-            if ($inspect['code'] !== 0 || ! is_array($labels)) {
-                // Keep the row excluded, but record that the enrolled list is
-                // now incomplete so the UI does not claim confirmed emptiness.
+            // A command or JSON failure marks the scan incomplete. A valid JSON
+            // null is an ordinary container with no labels, not a failure.
+            if ($inspect['code'] !== 0 || (json_last_error() !== JSON_ERROR_NONE)) {
                 $inspectionFailed = true;
+                continue;
+            }
+            if ($labels === null) {
+                continue;
+            }
+            if ( ! is_array($labels)) {
                 continue;
             }
 
