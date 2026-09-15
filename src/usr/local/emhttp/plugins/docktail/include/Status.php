@@ -220,22 +220,24 @@ final class Status
     }
 
     /**
-     * Services currently advertised by tailscaled, keyed by "svc:<name>".
+     * Local Serve entries, keyed by "svc:<name>". Presence proves only that
+     * proxy configuration exists, not approval, readiness or client access.
      *
      * Three outcomes, and they must not be confused: a config with Services, a
-     * config with none (normal - nothing is advertised right now), and output
+     * config with none (normal - no local Service entries), and output
      * that could not be read at all. Treating the middle case as the last one
      * made an empty serve config report itself as a Tailscale version problem.
      *
-     * @return array{services: array<string, array<string, mixed>>, raw: string, degraded: bool}
+     * @return array{services: array<string, array<string, mixed>>, config: array, raw: string, degraded: bool}
      */
     public static function advertisedServices(): array
     {
         if ( ! file_exists(self::TAILSCALE_BIN)) {
-            return ['services' => [], 'raw' => '', 'degraded' => false];
+            return ['services' => [], 'config' => [], 'raw' => '', 'degraded' => true];
         }
 
-        $out    = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status --json')['out'];
+        $result = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status --json');
+        $out    = $result['out'];
         $parsed = json_decode($out, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
@@ -247,21 +249,19 @@ final class Status
             }
         }
 
-        if (json_last_error() === JSON_ERROR_NONE) {
-            // Valid JSON. "null" and "{}" both mean nothing is advertised,
+        if ($result['code'] === 0 && json_last_error() === JSON_ERROR_NONE && ($parsed === null || is_array($parsed))
+            && (! isset($parsed['Services']) || is_array($parsed['Services']))) {
+            // Valid JSON. "null" and "{}" both mean no local Serve entries,
             // which is a state, not a failure.
             $services = is_array($parsed) && isset($parsed['Services']) && is_array($parsed['Services'])
                 ? $parsed['Services']
                 : [];
 
-            return ['services' => $services, 'raw' => '', 'degraded' => false];
+            return ['services' => $services, 'config' => $parsed ?? [], 'raw' => '', 'degraded' => false];
         }
 
-        // Genuinely unreadable: fall back to the plain-text output so the page
-        // shows something real rather than an empty table.
-        $plain = self::run(escapeshellarg(self::TAILSCALE_BIN) . ' serve status');
-
-        return ['services' => [], 'raw' => $plain['out'], 'degraded' => true];
+        // Never return raw CLI output: a proxy URL can contain credentials.
+        return ['services' => [], 'config' => [], 'raw' => '', 'degraded' => true];
     }
 
     /**
@@ -304,11 +304,11 @@ final class Status
                 continue;
             }
 
-            $inspect = self::run(escapeshellarg(self::DOCKER_BIN) . ' inspect --format ' . escapeshellarg('{{json .Config.Labels}}') . ' ' . escapeshellarg($id));
-            $labels  = json_decode($inspect['out'], true);
-            if ( ! is_array($labels)) {
+            $info = Labels::containerInfo($id);
+            if ( ! $info['found']) {
                 continue;
             }
+            $labels = $info['labels'];
 
             $docktailLabels = [];
             foreach ($labels as $key => $value) {
@@ -331,12 +331,13 @@ final class Status
 
     /**
      * One container/service row per labelled container, joined against what
-     * tailscaled currently advertises.
+     * the local Serve configuration. The legacy method name above is retained
+     * for callers; the UI must not call this an advertisement/access verdict.
      *
      * @param  array<string, array<string, mixed>> $advertised
-     * @return list<array{container: string, service: string, port: string, protocol: string, advertised: bool}>
+     * @return list<array<string, mixed>>
      */
-    public static function serviceRows(array $advertised): array
+    public static function serviceRows(array $advertised, ?array $serve = null): array
     {
         $rows = [];
 
@@ -347,27 +348,43 @@ final class Status
                 $name = $labels['docktail.service.name'] ?? '';
                 $port = $labels['docktail.service.port'] ?? '';
                 $rows[] = [
+                    'id'         => $container['id'],
+                    'kind'       => 'service',
                     'container'  => $container['name'],
-                    'service'    => $name === '' ? '(missing docktail.service.name)' : 'svc:' . $name,
+                    'service'    => $name === '' ? '(missing docktail.service.name)' : (str_starts_with($name, 'svc:') ? $name : 'svc:' . $name),
                     'port'       => $port === '' ? '(missing docktail.service.port)' : $port,
                     'protocol'   => $labels['docktail.service.protocol'] ?? ($port === '443' ? 'https' : 'http'),
-                    'advertised' => $name !== '' && isset($advertised['svc:' . $name]),
+                    'localConfigured' => $name !== '' && isset($advertised[str_starts_with($name, 'svc:') ? $name : 'svc:' . $name]),
                 ];
             }
 
             if (($labels['docktail.funnel.enable'] ?? '') === 'true') {
-                $name = $labels['docktail.service.name'] ?? '';
                 $rows[] = [
+                    'id'         => $container['id'],
+                    'kind'       => 'funnel',
                     'container'  => $container['name'],
-                    'service'    => ($name === '' ? '(funnel)' : 'svc:' . $name) . ' (funnel)',
+                    'service'    => '(node Funnel)',
                     'port'       => $labels['docktail.funnel.port'] ?? '',
-                    'protocol'   => $labels['docktail.funnel.protocol'] ?? 'https',
-                    'advertised' => $name !== '' && isset($advertised['svc:' . $name]),
+                    'protocol'   => in_array($labels['docktail.funnel.protocol'] ?? 'https', ['tcp', 'tls-terminated-tcp'], true) ? 'tcp' : 'http',
+                    'localConfigured' => $serve === null ? null : self::funnelEntryPresent($serve, $labels),
                 ];
             }
         }
 
         return $rows;
+    }
+
+    /** A Funnel lives in the node's top-level Serve config, not Services. */
+    private static function funnelEntryPresent(array $serve, array $labels): bool
+    {
+        $port = $labels['docktail.funnel.funnel-port'] ?? '443';
+        foreach (($serve['AllowFunnel'] ?? []) as $hostPort => $allowed) {
+            if ($allowed === true && str_ends_with((string) $hostPort, ':' . $port)
+                && isset($serve['TCP'][$port])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -382,7 +399,7 @@ final class Status
         return [
             'state'            => self::serviceState(),
             'preflight'        => self::preflight(),
-            'rows'             => self::serviceRows($advertised['services']),
+            'rows'             => self::serviceRows($advertised['services'], $advertised['config']),
             'advertised'       => array_keys($advertised['services']),
             'serveStatusPlain' => $advertised['raw'],
             'serveUnreadable'  => $advertised['degraded'],
@@ -460,58 +477,65 @@ final class Status
 
 <table class="unraid tablesorter"><thead><tr><td>Containers</td></tr></thead></table>
 <blockquote class="inline_help">
-    Every running container carrying a <code>docktail.*</code> label, joined against what
-    <code>tailscaled</code> currently advertises.
+    Running containers with Service or Funnel labels, joined against the local
+    <code>tailscaled</code> Serve configuration.
     <strong>Service</strong> is the tailnet name (<code>svc:&lt;name&gt;</code>) taken from
-    <code>docktail.service.name</code>; <strong>Container port</strong> is the port inside the
-    container that traffic is proxied to.
-    <strong>Advertised</strong> means <code>tailscaled</code> is serving that Service right now
-    &mdash; a cross here with DockTail running usually means the Service definition does not
-    exist in your tailnet, this node is not tagged, or the reconcile interval has not elapsed
-    yet. A tick while DockTail is <em>Stopped</em> means something else advertised it: another
-    DockTail instance, or a leftover from <em>Skip shutdown cleanup</em>.
+    <code>docktail.service.name</code>; <strong>Application port</strong> and
+    <strong>Application protocol</strong> describe the backend, not the client-facing endpoint.
+    <strong>Local proxy config</strong> reports only an entry's presence. It does not prove
+    that its backend is correct, the host is approved or ready, or a client can resolve or
+    access it. A Funnel entry is node-wide and can belong to another container.
+    <strong>Check connection</strong> reads current configuration and probes that container's
+    backend on demand (up to 20 seconds). Each result has its own status and remedy.
 </blockquote>
 
 <?php if ($snapshot['rows'] === []) { ?>
 <div class="docktail-remedy">
-    No running container carries a <code>docktail.*</code> label. Use the Labels tab to
-    generate one, then paste it into the container's Extra Parameters field.
+    No running container enables a DockTail Service or Funnel. Use the Labels tab to
+    generate the labels, then paste them into the container's Extra Parameters field.
 </div>
 <?php } else { ?>
-<table class="unraid tablesorter">
-<thead><tr><th>Container</th><th>Service</th><th>Container port</th><th>Protocol</th><th>Advertised</th></tr></thead>
+<table class="unraid tablesorter docktail-container-table">
+<thead><tr><th>Container</th><th>Service</th><th>Application port</th><th>Application protocol</th><th>Local proxy config</th><th>Connection</th></tr></thead>
 <tbody>
 <?php foreach ($snapshot['rows'] as $row) { ?>
     <tr>
-        <td><?= h($row['container']); ?></td>
-        <td><?= h($row['service']); ?></td>
-        <td><?= h($row['port']); ?></td>
-        <td><?= h($row['protocol']); ?></td>
-        <td><?= $row['advertised'] ? '<span class="green-text">&#10004;</span>' : '<span class="red-text">&#10008;</span>'; ?></td>
+        <td data-label="Container"><?= h($row['container']); ?></td>
+        <td data-label="Service"><?= h($row['service']); ?></td>
+        <td data-label="Application port"><?= h($row['port']); ?></td>
+        <td data-label="Application protocol"><?= h($row['protocol']); ?></td>
+        <td data-label="Local proxy config"><?= $snapshot['serveUnreadable'] || $row['localConfigured'] === null ? 'Unknown' : ($row['localConfigured'] ? 'Entry present (unchecked)' : 'Entry absent'); ?></td>
+        <td data-label="Connection">
+            <input type="button" class="docktail-check" value="Check connection" data-container="<?= h($row['id']); ?>" onclick="docktailCheck(this)">
+        </td>
     </tr>
+    <tr class="docktail-check-detail docktail-hidden"><td colspan="6">
+        <input type="button" value="Dismiss" onclick="docktailInvalidateStatus(); $(this).closest('tr').prev().find('.docktail-check').trigger('focus')">
+        <div class="docktail-check-result" role="status" aria-live="polite"></div>
+    </td></tr>
 <?php } ?>
 </tbody>
 </table>
 <?php } ?>
 
 <?php
-// Nothing advertised while the service is up is usually just timing: DockTail
-// withdraws everything when it stops, and re-advertises on its next reconcile.
-if ($snapshot['rows'] !== [] && $snapshot['advertised'] === [] && $state === 'Running' && ! $snapshot['serveUnreadable']) { ?>
+// An enabled Service can be waiting for reconciliation. Funnel-only containers
+// do not need a Service entry and must not trigger this message.
+if (array_filter($snapshot['rows'], static fn (array $row): bool => $row['kind'] === 'service') !== []
+    && $snapshot['advertised'] === [] && $state === 'Running' && ! $snapshot['serveUnreadable']) { ?>
 <div class="docktail-remedy">
-    <code>tailscaled</code> is advertising nothing yet. After a start or restart DockTail
-    re-advertises on its next reconcile pass, so this clears within one reconcile interval
-    (60 seconds by default) &mdash; press Refresh again. If it persists, check
+    No local Service entries were found. After a start or restart DockTail configures them
+    on its next reconcile pass (60 seconds by default). Refresh after that interval; if
+    entries remain absent, check
     <code>/var/log/docktail.log</code>.
 </div>
 <?php } ?>
 
 <?php if ($snapshot['serveUnreadable']) { ?>
 <div class="docktail-remedy">
-    Could not read the serve configuration as JSON; the raw
-    <code>tailscale serve status</code> output follows.
+    Could not read the local Serve configuration. Local proxy state is unknown.
+    Check the Tailscale plugin and try Refresh again.
 </div>
-<pre><?= h((string) $snapshot['serveStatusPlain']); ?></pre>
 <?php } ?>
 
 <table class="unraid tablesorter"><thead><tr><td>Versions</td></tr></thead></table>
@@ -577,12 +601,120 @@ if ($snapshot['rows'] !== [] && $snapshot['advertised'] === [] && $state === 'Ru
 <div id="docktail_status"><?= self::renderBody(self::snapshot()); ?></div>
 
 <script>
+var docktailStatusEpoch = 0;
+var docktailCheckRequest = null;
+var docktailRefreshRequest = null;
+var docktailControlBusy = false;
+var docktailStatusToken = <?= json_encode($token, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+
+// A refresh, check or service control invalidates all older callbacks. Aborting
+// alone is insufficient: a completed response can already have queued a handler.
+function docktailInvalidateStatus() {
+    docktailStatusEpoch++;
+    if (docktailCheckRequest) {
+        docktailCheckRequest.abort();
+        docktailCheckRequest = null;
+    }
+    if (docktailRefreshRequest) {
+        docktailRefreshRequest.abort();
+        docktailRefreshRequest = null;
+    }
+    $('.docktail-check').prop('disabled', docktailControlBusy).val('Check connection');
+    $('.docktail-check-detail').addClass('docktail-hidden').find('.docktail-check-result').empty();
+    $('#docktail_control_note').removeClass('docktail-apply-error').text('');
+    return docktailStatusEpoch;
+}
+
+function docktailCheck(button) {
+    if (docktailControlBusy || docktailCheckRequest) {
+        return;
+    }
+    var epoch = docktailInvalidateStatus();
+    var input = $(button);
+    var container = input.attr('data-container');
+    var detail = input.closest('tr').next('.docktail-check-detail').removeClass('docktail-hidden');
+    var result = detail.find('.docktail-check-result');
+    result.text('Checking this container from the Unraid host (up to 20 seconds)...');
+    $('.docktail-check').prop('disabled', true);
+    input.val('Checking...');
+
+    function current() {
+        return epoch === docktailStatusEpoch && $.contains(document, button);
+    }
+    function failure(message) {
+        result.empty().append($('<span>').addClass('orange-text').text(message));
+    }
+    docktailCheckRequest = $.ajax({
+        url: '/plugins/docktail/status.php',
+        type: 'POST',
+        dataType: 'json',
+        timeout: 25000,
+        data: {csrf_token: docktailStatusToken, action: 'check_connection', container: container}
+    }).done(function(data) {
+        if (!current()) {
+            return;
+        }
+        var states = {
+            pass: ['Confirmed', 'green-text'],
+            fail: ['Problem', 'red-text'],
+            warning: ['Advisory', 'orange-text'],
+            unknown: ['Unknown', 'orange-text'],
+            not_verified: ['Not verified', 'orange-text'],
+            not_applicable: ['Not applicable', '']
+        };
+        if (!data || data.container !== container || !Array.isArray(data.checks) || !data.checks.length
+            || data.checks.some(function(check) {
+                return !check || !Object.prototype.hasOwnProperty.call(states, check.status)
+                    || typeof check.label !== 'string' || typeof check.detail !== 'string'
+                    || typeof check.remedy !== 'string';
+            })) {
+            failure('No usable check result was returned. State is unknown; retry or refresh.');
+            return;
+        }
+        result.empty().append($('<p>').text('Host-side snapshot. Client access remains unverified.'
+            + (typeof data.checkedAt === 'string' ? ' Checked at ' + data.checkedAt : '')));
+        var table = $('<table>').addClass('unraid docktail-check-table');
+        var body = $('<tbody>').appendTo(table);
+        data.checks.forEach(function(check) {
+            var state = states[check.status];
+            var row = $('<tr>').appendTo(body);
+            $('<td>').text(check.label).appendTo(row);
+            $('<td>').append($('<span>').addClass(state[1]).text(state[0])).appendTo(row);
+            var cell = $('<td>').append($('<div>').text(check.detail)).appendTo(row);
+            if (check.remedy) {
+                cell.append($('<div>').addClass('docktail-remedy').text(check.remedy));
+            }
+        });
+        // Every result is inserted as text. No server, label or API string is
+        // interpreted as HTML, a URL, a CSS selector or a JavaScript fragment.
+        result.append(table);
+    }).fail(function(xhr, status) {
+        if (!current()) {
+            return;
+        }
+        failure(status === 'timeout'
+            ? 'Check timed out. Results are unknown; retry after checking Docker and Tailscale.'
+            : (xhr.status === 403 ? 'Request rejected (HTTP 403). Reload the page to refresh the Unraid session and CSRF token.'
+                : 'Connection check failed. Results are unknown; retry or refresh.'));
+    }).always(function() {
+        if (current()) {
+            docktailCheckRequest = null;
+            $('.docktail-check').prop('disabled', false).val('Check connection');
+        }
+    });
+}
+
 /*
  * Submitted over AJAX rather than into the hidden progressFrame. A stop waits
  * up to 35 seconds for DockTail to withdraw its Services, and posting into a
  * frame nobody can see made that indistinguishable from a dead button.
  */
 function docktailControl(action) {
+    if (docktailControlBusy) {
+        return;
+    }
+    docktailControlBusy = true;
+    docktailInvalidateStatus();
     var note = $('#docktail_control_note');
     var buttons = $('.docktail-control');
     var message = '';
@@ -621,6 +753,7 @@ function docktailControl(action) {
             ? 'Timed out waiting for the service script. Reload to see the current state.'
             : 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.';
     }).always(function() {
+        docktailControlBusy = false;
         buttons.prop('disabled', false);
         // Refresh either way: the action may well have taken effect even if the
         // request did not come back cleanly. The refresh replaces the fragment
@@ -630,7 +763,25 @@ function docktailControl(action) {
 }
 
 function docktailRefresh(message, failed) {
-    $.post('/plugins/docktail/status.php', {csrf_token: '<?= h($token); ?>'}, function(data) {
+    if (docktailControlBusy) {
+        return;
+    }
+    var epoch = docktailInvalidateStatus();
+    $('#docktail_control_note').removeClass('docktail-apply-error').text('Refreshing...');
+    docktailRefreshRequest = $.ajax({
+        url: '/plugins/docktail/status.php',
+        type: 'POST',
+        dataType: 'json',
+        timeout: 25000,
+        data: {csrf_token: docktailStatusToken, action: 'snapshot'}
+    }).done(function(data) {
+        if (epoch !== docktailStatusEpoch) {
+            return;
+        }
+        if (!data || typeof data.html !== 'string') {
+            $('#docktail_control_note').addClass('docktail-apply-error').text('Refresh returned no usable snapshot; retry.');
+            return;
+        }
         $('#docktail_status').html(data.html);
 
         // The replacement fragment arrives unwired, and Unraid's page-load
@@ -646,7 +797,16 @@ function docktailRefresh(message, failed) {
                 .toggleClass('docktail-apply-error', !!failed)
                 .text(message);
         }
-    }, 'json');
+    }).fail(function(xhr, status) {
+        if (epoch === docktailStatusEpoch) {
+            $('#docktail_control_note').addClass('docktail-apply-error')
+                .text(status === 'timeout' ? 'Refresh timed out; retry.' : 'Refresh failed; reload the page or retry.');
+        }
+    }).always(function() {
+        if (epoch === docktailStatusEpoch) {
+            docktailRefreshRequest = null;
+        }
+    });
 }
 </script>
         <?php

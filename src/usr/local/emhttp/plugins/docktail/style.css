@@ -75,3 +75,66 @@
 .docktail-warning code {
     font-style: normal;
 }
+
+/* Diagnostic prose wraps within the page, including native narrow-screen tables. */
+.docktail-check-result,
+.docktail-check-result p,
+.docktail-check-result div,
+.docktail-check-table td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+}
+.docktail-check-table {
+    width: 100%;
+}
+.docktail-check-table td {
+    vertical-align: top;
+}
+.docktail-check-result .docktail-remedy {
+    margin-left: 0;
+}
+#docktail_route_preview {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+    .docktail-container-table > thead {
+        display: none;
+    }
+    .docktail-container-table,
+    .docktail-container-table > tbody,
+    .docktail-container-table > tbody > tr:not(.docktail-hidden),
+    .docktail-container-table > tbody > tr > td {
+        display: block;
+        width: auto;
+        height: auto;
+        white-space: normal;
+    }
+    .docktail-container-table > tbody > tr > td[data-label]::before {
+        content: attr(data-label) ": ";
+        font-weight: bold;
+    }
+    .docktail-container-table > tbody > tr > td {
+        overflow-wrap: anywhere;
+        text-align: left;
+    }
+    .docktail-check-table,
+    .docktail-check-table > tbody,
+    .docktail-check-table > tbody > tr,
+    .docktail-check-table > tbody > tr > td {
+        display: block;
+        width: auto;
+        height: auto;
+    }
+    .docktail-check-table > tbody > tr {
+        padding: 8px 0;
+    }
+    .docktail-check-table > tbody > tr > td:nth-child(-n+2) {
+        display: inline;
+    }
+    .docktail-check-table > tbody > tr > td:first-child {
+        font-weight: bold;
+    }
+}
