@@ -41,16 +41,51 @@ https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.
 ## Use
 
 1. **Settings** — enter the OAuth credentials, set *Enable DockTail* to *Yes*, Apply.
-2. **DockTail** — confirm every preflight check passes.
-3. **Labels** — build the label string for a container, then paste it into
-   *Docker → container → Advanced View → Extra Parameters → Apply*. Unraid's container
-   editor has no label field, so Extra Parameters is the only route.
+2. **DockTail** — review the environment preflight checks. These do not prove that a
+   particular application is reachable.
+3. **Labels** — choose the container and configure both **Connect to application**
+   (the backend protocol and port) and **Access through Tailscale** (the client-facing
+   protocol and port). Review the route preview. A port suggested by the Unraid
+   template is a starting point, not proof that the application listens there.
+4. Copy the generated Extra Parameters into
+   *Docker → container → Advanced View → Extra Parameters → Apply*. The builder
+   does not edit templates or restart containers itself.
+5. Add the generated, narrowly scoped grant and policy test in Tailscale's Access
+   controls editor. Choose the intended user or group explicitly; host approval
+   does not grant clients access to the Service.
+6. Back on **DockTail**, use **Check connection** for the container. Then open the
+   service URL from the intended client device.
 
 Example: expose a container listening on port 80 as `svc:unraid-test`:
 
 ```
 --label docktail.service.enable=true --label docktail.service.name=unraid-test --label docktail.service.port=80
 ```
+
+The application port and Tailscale port need not match. For example, an application
+speaking HTTP on port 4859 can be exposed over HTTPS on port 443:
+
+```sh
+--label docktail.service.enable=true --label docktail.service.name=homey --label docktail.service.port=4859 --label docktail.service.protocol=http --label docktail.service.service-port=443 --label docktail.service.service-protocol=https
+```
+
+The corresponding access grant targets **443**, not 4859:
+
+```json
+{
+  "src": ["you@example.com"],
+  "dst": ["svc:homey"],
+  "ip": ["tcp:443"]
+}
+```
+
+Replace the example identity with an actual Tailscale user login: an email address,
+`username@github`, or `username@passkey`. Existing policy-defined groups such as
+`group:household` and synced groups such as `group:admins@example.com` are also
+supported. For a group, enter an actual member's login for the policy test.
+Merge the grant into the existing policy; do not replace the policy with this
+fragment. A policy test uses the user's login as `src` and
+`["svc:homey:443"]` as `accept`.
 
 `docktail.funnel.*` labels additionally require **Allow Funnel** in the Tailscale
 plugin's own settings. While that is off, the Tailscale plugin strips Funnel entries
@@ -62,9 +97,39 @@ Funnel.
 
 | Tab | What it does |
 |---|---|
-| DockTail | Opening view: service state with Start/Stop/Restart, environment preflight (Tailscale, `tailscaled`, Docker, node tags, credentials, Funnel), and labelled containers joined against what `tailscaled` advertises. |
+| DockTail | Service controls, environment preflight, local proxy configuration, and on-demand per-container connection diagnostics. Local configuration is not a promise of client access. |
 | Settings | Credentials, tags, reconcile interval, log level. Credentials are stored separately in a `0600` file that is excluded from Unraid Connect's flash backup. |
-| Labels | Generates the `--label` string. It only produces text — it never edits container templates and never recreates containers. |
+| Labels | Both sides of the connection, route preview, template port suggestions, Extra Parameters, and scoped access-policy snippets. It produces text only: it does not edit templates, recreate containers, or change tailnet policy. |
+
+### Connection diagnostics
+
+**Check connection** separates backend connectivity, local proxy configuration,
+the tailnet-wide Service definition, and host approval/readiness. It is read-only
+and runs on demand, not automatically for every container when the page loads.
+Use **Dismiss** to close the results or stop waiting for a running check. Late
+responses cannot reopen the panel; host-side probes may still finish within their
+time limit. **Check connection** remains available to run a fresh check.
+Existing credentials are used for Control Plane reads; missing permissions or an
+unavailable API are reported as unknown, not as a passing check. The plugin does
+not request broader permissions or automatically modify shared Service definitions.
+
+If the Service definition allows a different port from the local endpoint, review
+that definition in Tailscale's admin console. Definitions are shared across hosts;
+changing one can affect other hosts advertising the same Service.
+
+Host-side diagnostics cannot establish access for a particular laptop or user.
+A missing grant can make a Service's MagicDNS name appear nonexistent, even with
+an approved, ready host. Check the grant and test the URL from the intended client.
+An HTTP response establishes transport reachability, not application health:
+authentication, setup, licensing, and subscription failures can remain.
+
+The bounded check currently covers the primary Service and Funnel with
+unambiguous IPv4 backend targets. Indexed Service endpoints and unresolved
+destinations are explicitly left unverified rather than guessed. Backend HTTP
+checks inspect the root response headers without following redirects or reading
+application pages. The intended client endpoint is shown when the local Tailscale
+DNS suffix is available; the Labels preview otherwise uses a clearly marked
+tailnet placeholder.
 
 ## Layout on disk
 

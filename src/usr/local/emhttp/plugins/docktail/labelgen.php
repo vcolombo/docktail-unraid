@@ -39,6 +39,8 @@ switch ((string) ($_POST['action'] ?? 'generate')) {
             'labelled'    => $info['labels'] !== [],
             'ports'       => $info['ports'],
             'portSummary' => Labels::summarizePorts($info['ports']),
+            'webUiPort'   => $info['webUiPort'],
+            'networkMode' => $info['networkMode'],
             'suggestName' => Labels::suggestName($container),
         ], JSON_UNESCAPED_SLASHES);
         break;
@@ -73,7 +75,8 @@ switch ((string) ($_POST['action'] ?? 'generate')) {
 
         echo json_encode([
             'errors'      => [],
-            'warnings'    => Labels::nameWarnings((string) ($_POST['service_name'] ?? ''), $container),
+            'warnings'    => ($_POST['service_enable'] ?? '') === '1'
+                ? Labels::nameWarnings((string) ($_POST['service_name'] ?? ''), $container) : [],
             'labels'      => $result,
             'extraParams' => Labels::mergeExtraParams($existing, $result),
             'merged'      => $info['hasTemplate'] && Labels::stripDocktailLabels($existing) !== '',

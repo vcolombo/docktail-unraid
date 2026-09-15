@@ -58,8 +58,8 @@ final class Labels
         $serviceName = $get('service_name');
         if ($serviceMode && $serviceName === '') {
             $errors[] = 'Service name is required.';
-        } elseif ($serviceName !== '' && preg_match('/^[a-zA-Z0-9-]+$/', $serviceName) !== 1) {
-            $errors[] = 'Service name may only contain letters, digits and hyphens.';
+        } elseif ($serviceName !== '' && preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', $serviceName) !== 1) {
+            $errors[] = 'Service name must be a lowercase DNS label: start and end with a letter or digit, and use only lowercase letters, digits and hyphens.';
         }
 
         $targetPort      = $get('service_port');
@@ -69,18 +69,18 @@ final class Labels
 
         if ($serviceMode) {
             if ($targetPort === '') {
-                $errors[] = 'Container port is required.';
+                $errors[] = 'Application port is required.';
             } elseif ( ! self::isPort($targetPort)) {
-                $errors[] = 'Container port must be a number between 1 and 65535.';
+                $errors[] = 'Application port must be a number between 1 and 65535.';
             }
             if ($servicePort !== '' && ! self::isPort($servicePort)) {
-                $errors[] = 'Service port must be a number between 1 and 65535.';
+                $errors[] = 'Frontend port must be a number between 1 and 65535.';
             }
             if ($targetProtocol !== '' && ! in_array($targetProtocol, self::TARGET_PROTOCOLS, true)) {
-                $errors[] = 'Container protocol must be one of: ' . implode(', ', self::TARGET_PROTOCOLS) . '.';
+                $errors[] = 'Application protocol must be one of: ' . implode(', ', self::TARGET_PROTOCOLS) . '.';
             }
             if ($serviceProtocol !== '' && ! in_array($serviceProtocol, self::SERVICE_PROTOCOLS, true)) {
-                $errors[] = 'Service protocol must be one of: ' . implode(', ', self::SERVICE_PROTOCOLS) . '.';
+                $errors[] = 'Frontend protocol must be one of: ' . implode(', ', self::SERVICE_PROTOCOLS) . '.';
             }
         }
 
@@ -285,11 +285,11 @@ final class Labels
      * already carries, the ports it exposes, and the Extra Parameters its
      * dockerMan template holds.
      *
-     * @return array{found: bool, labels: array<string, string>, ports: list<string>, extraParams: string, hasTemplate: bool}
+     * @return array{found: bool, labels: array<string, string>, ports: list<string>, extraParams: string, hasTemplate: bool, webUiPort: string, networkMode: string}
      */
     public static function containerInfo(string $name): array
     {
-        $info = ['found' => false, 'labels' => [], 'ports' => [], 'extraParams' => '', 'hasTemplate' => false];
+        $info = ['found' => false, 'labels' => [], 'ports' => [], 'extraParams' => '', 'hasTemplate' => false, 'webUiPort' => '', 'networkMode' => ''];
 
         if ($name === '' || ! file_exists(Status::DOCKER_SOCK) || ! file_exists(Status::DOCKER_BIN)) {
             return $info;
@@ -298,7 +298,7 @@ final class Labels
         // One inspect call: labels, the ports declared by the image, and the
         // published-port map (which also covers ports published without being
         // declared EXPOSE).
-        $format = '{{json .Config.Labels}}' . "\t" . '{{json .Config.ExposedPorts}}' . "\t" . '{{json .NetworkSettings.Ports}}';
+        $format = '{{json .Config.Labels}}' . "\t" . '{{json .Config.ExposedPorts}}' . "\t" . '{{json .NetworkSettings.Ports}}' . "\t" . '{{json .HostConfig.NetworkMode}}';
         $out    = [];
         $code   = 1;
         @exec(
@@ -316,6 +316,8 @@ final class Labels
         }
 
         $info['found'] = true;
+        $networkMode = json_decode($parts[3] ?? '', true);
+        $info['networkMode'] = is_string($networkMode) ? $networkMode : '';
 
         $labels = json_decode($parts[0], true);
         if (is_array($labels)) {
@@ -345,19 +347,20 @@ final class Labels
         $template = self::templateFor($name);
         if ($template !== null) {
             $info['hasTemplate'] = true;
-            $info['extraParams'] = $template;
+            $info['extraParams'] = $template['extraParams'];
+            $info['webUiPort'] = $template['webUiPort'];
         }
 
         return $info;
     }
 
     /**
-     * The ExtraParams string from the container's dockerMan template, or null
-     * when no template matches. Read-only: the plugin never writes these files,
-     * because dockerMan only applies a template change by stopping and removing
-     * the container.
+     * Read-only template metadata. A WebUI port is a suggestion, not evidence
+     * that a listener exists, and never changes labels or Docker's port list.
+     *
+     * @return array{extraParams: string, webUiPort: string}|null
      */
-    private static function templateFor(string $name): ?string
+    private static function templateFor(string $name): ?array
     {
         foreach ((array) @glob(self::TEMPLATE_DIR . '/*.xml') as $file) {
             $xml = @simplexml_load_file($file);
@@ -368,7 +371,17 @@ final class Labels
                 continue;
             }
 
-            return trim(html_entity_decode((string) ($xml->ExtraParams ?? ''), ENT_QUOTES | ENT_XML1, 'UTF-8'));
+            $webUi = trim((string) ($xml->WebUI ?? ''));
+            $port = '';
+            if (preg_match('/^https?:\/\/[^\/]+:\[PORT:(\d+)\](?:[\/?#]|$)/i', $webUi, $match) === 1
+                || preg_match('/^https?:\/\/[^\/]+:(\d+)(?:[\/?#]|$)/i', $webUi, $match) === 1) {
+                $port = self::isPort($match[1]) ? $match[1] : '';
+            }
+
+            return [
+                'extraParams' => trim(html_entity_decode((string) ($xml->ExtraParams ?? ''), ENT_QUOTES | ENT_XML1, 'UTF-8')),
+                'webUiPort'   => $port,
+            ];
         }
 
         return null;
@@ -706,7 +719,7 @@ final class Labels
 
     /**
      * A service name suggestion derived from the container name: Tailscale
-     * Service names allow only letters, digits and hyphens.
+     * Service names are lowercase DNS labels (letters, digits and hyphens).
      */
     public static function suggestName(string $containerName): string
     {
@@ -788,15 +801,19 @@ final class Labels
 </dl>
 <blockquote class="inline_help">
     Becomes <code>svc:&lt;name&gt;</code> on the tailnet and is reachable at
-    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>. Letters, digits and hyphens only.
+    <code>&lt;name&gt;.&lt;tailnet&gt;.ts.net</code>. Lowercase letters, digits and hyphens only.
 </blockquote>
 
+<table class="unraid tablesorter"><thead><tr><td>Connect to application</td></tr></thead></table>
+
 <dl>
-    <dt>Container port:</dt>
+    <dt>Application port:</dt>
     <dd>
         <input type="text" name="service_port" id="docktail_service_port" placeholder="80" class="narrow" list="docktail_ports">
         <datalist id="docktail_ports"></datalist>
         <span id="docktail_port_note" class="docktail-apply-result"></span>
+        <span id="docktail_webui_note" class="docktail-apply-result"></span>
+        <input type="button" id="docktail_use_webui" class="docktail-hidden" value="Use WebUI suggestion">
     </dd>
 </dl>
 <blockquote class="inline_help">
@@ -805,26 +822,7 @@ final class Labels
 </blockquote>
 
 <dl>
-    <dt>Enable Funnel:</dt>
-    <dd>
-        <select name="funnel_enable" id="docktail_funnel_enable" size="1" class="narrow">
-            <option value="0" selected>No</option>
-            <option value="1">Yes</option>
-        </select>
-    </dd>
-</dl>
-<blockquote class="inline_help">
-    Exposes the container to the <strong>public internet</strong>, not just your tailnet.
-    Also requires "Allow Funnel" in the Tailscale plugin, otherwise it removes DockTail's
-    Funnel entries.
-</blockquote>
-
-<div class="advanced">
-
-<table class="unraid tablesorter"><thead><tr><td>Service (advanced)</td></tr></thead></table>
-
-<dl>
-    <dt>Container protocol:</dt>
+    <dt>Application protocol:</dt>
     <dd>
         <select name="service_protocol" size="1" class="narrow">
             <option value="">default</option>
@@ -841,8 +839,10 @@ final class Labels
     is 443. Use <code>https+insecure</code> for a self-signed backend.
 </blockquote>
 
+<table class="unraid tablesorter"><thead><tr><td>Access through Tailscale</td></tr></thead></table>
+
 <dl>
-    <dt>Service protocol:</dt>
+    <dt>Frontend protocol:</dt>
     <dd>
         <select name="service_service_protocol" size="1" class="narrow">
             <option value="">default</option>
@@ -854,7 +854,7 @@ final class Labels
     </dd>
 </dl>
 <blockquote class="inline_help">
-    The protocol Tailscale speaks to <em>clients</em>, as opposed to <em>Container protocol</em>
+    The protocol Tailscale speaks to <em>clients</em>, as opposed to <em>Application protocol</em>
     above, which is what your container speaks. Leave it on default and DockTail picks
     <code>https</code> for service port 443 and <code>http</code> otherwise, or matches the
     container protocol when that is TCP.
@@ -864,13 +864,39 @@ final class Labels
 </blockquote>
 
 <dl>
-    <dt>Service port:</dt>
-    <dd><input type="text" name="service_service_port" placeholder="443" class="narrow"></dd>
+    <dt>Frontend port:</dt>
+    <dd><input type="text" name="service_service_port" placeholder="automatic" class="narrow"></dd>
 </dl>
 <blockquote class="inline_help">
     Port Tailscale listens on for this Service. Defaults to 443 for
-    <code>https</code>, otherwise 80.
+    <code>https</code>, otherwise 80. Leaving both frontend fields on default preserves
+    DockTail's HTTP-on-80 default for HTTP backends; it does not automatically enable HTTPS.
 </blockquote>
+
+<dl>
+    <dt>Effective Service route:</dt>
+    <dd><pre id="docktail_route_preview"></pre></dd>
+</dl>
+<p>Preview of the current form, not a connection check. DNS, host approval, client access,
+    application health and licensing are not verified. The tailnet suffix is a placeholder.</p>
+<dl>
+    <dt>Enable Funnel:</dt>
+    <dd>
+        <select name="funnel_enable" id="docktail_funnel_enable" size="1" class="narrow">
+            <option value="0" selected>No</option>
+            <option value="1">Yes</option>
+        </select>
+    </dd>
+</dl>
+<blockquote class="inline_help">
+    Exposes the container to the <strong>public internet</strong>, not just your tailnet.
+    Also requires "Allow Funnel" in the Tailscale plugin, otherwise it removes DockTail's
+    Funnel entries.
+</blockquote>
+
+
+<div class="advanced">
+<table class="unraid tablesorter"><thead><tr><td>Service (advanced)</td></tr></thead></table>
 
 <dl>
     <dt>Service path:</dt>
@@ -1028,6 +1054,44 @@ final class Labels
     tailnet is governed by <em>Delete unused services</em> on the Settings tab.
 </blockquote>
 
+<div id="docktail_access_guidance">
+<table class="unraid tablesorter"><thead><tr><td>Allow clients to access this Service</td></tr></thead></table>
+<p>Approving a Service host does not grant clients access. First paste the generated labels
+    into the container's Extra Parameters and Apply. Then merge the entries below into your
+    existing <a href="https://login.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">tailnet access policy</a>,
+    run its tests and save it. Do not replace your whole policy. Approval and access are
+    separate steps; this page changes neither. Existing broader rules still apply.</p>
+<p>In the <a href="https://login.tailscale.com/admin/services" target="_blank" rel="noopener noreferrer">Services admin page</a>,
+    the Service definition's endpoints must include the frontend TCP port shown in the
+    preview, not the application port. Check that this host is approved separately.
+    A local Serve entry alone does not establish either of these conditions.</p>
+<dl>
+    <dt>Allowed user or group:</dt>
+    <dd><input type="text" id="docktail_policy_source" placeholder="user@example.com or group:household" autocomplete="off"></dd>
+</dl>
+<dl id="docktail_policy_test_user_row" class="docktail-hidden">
+    <dt>User to test:</dt>
+    <dd><input type="text" id="docktail_policy_test_user" placeholder="Actual group member's Tailscale login" autocomplete="off"></dd>
+</dl>
+<p>Enter one real tailnet user login (email, <code>username@github</code> or
+    <code>username@passkey</code>) or an existing group such as <code>group:household</code>
+    or <code>group:admins@example.com</code>. For a group, use its existing policy-defined
+    or synced membership and enter an actual member's login for the test.
+    No wildcard or default access is added.</p>
+<p id="docktail_policy_note"></p>
+<dl>
+    <dt>Entry for grants:</dt>
+    <dd><textarea id="docktail_grant_out" rows="8" cols="80" readonly spellcheck="false"></textarea>
+        <input type="button" id="docktail_copy_grant" value="Copy grant" disabled onclick="docktailCopyPolicy('grant')"></dd>
+</dl>
+<dl>
+    <dt>Entry for tests:</dt>
+    <dd><textarea id="docktail_policy_test_out" rows="7" cols="80" readonly spellcheck="false"></textarea>
+        <input type="button" id="docktail_copy_policy_test" value="Copy test" disabled onclick="docktailCopyPolicy('test')"></dd>
+</dl>
+<span id="docktail_policy_copy_note" class="docktail-apply-result"></span>
+</div>
+
 <table class="unraid tablesorter"><thead><tr><td>Enrolment</td></tr></thead></table>
 <blockquote class="inline_help">
     Which running containers carry <code>docktail.*</code> labels. A container with no
@@ -1060,13 +1124,118 @@ final class Labels
 
 <script>
 var docktailGenTimer = null;
+var docktailRevision = 0;
+var docktailValidatedRevision = -1;
+var docktailLoading = false;
+var docktailLoadFailed = false;
+var docktailRemoving = false;
+var docktailContainerInfo = {};
+
+function docktailValue(name) {
+    return String($('#docktail_labels [name="' + name + '"]').val() || '').trim();
+}
+
+function docktailRoute() {
+    var targetPort = docktailValue('service_port');
+    var targetProtocol = docktailValue('service_protocol') || (targetPort === '443' ? 'https' : 'http');
+    var port = docktailValue('service_service_port');
+    var protocol = docktailValue('service_service_protocol');
+    if (!protocol) {
+        protocol = (targetProtocol === 'tcp' || targetProtocol === 'tls-terminated-tcp')
+            ? targetProtocol : (port === '443' ? 'https' : 'http');
+    }
+    return {
+        name: docktailValue('service_name'),
+        targetPort: targetPort,
+        targetProtocol: targetProtocol,
+        port: port || (protocol === 'https' ? '443' : '80'),
+        protocol: protocol
+    };
+}
+
+function docktailPreview() {
+    var enabled = docktailValue('service_enable') === '1' && !docktailRemoving;
+    $('#docktail_access_guidance').toggle(enabled);
+    if (!enabled) {
+        $('#docktail_route_preview').text('No Tailscale Service route requested. Funnel, if enabled, is public and uses its own settings.');
+        docktailPolicy();
+        return;
+    }
+    var route = docktailRoute();
+    var host = (route.name || '<service>') + '.<tailnet>.ts.net';
+    var frontend = route.protocol === 'http' || route.protocol === 'https'
+        ? route.protocol + '://' + host + ':' + route.port + (docktailValue('service_path') || '/')
+        : host + ':' + route.port + ' (' + route.protocol + '; not an HTTP URL)';
+    var target = '<destination not resolved>:' + (route.targetPort || '<application port>');
+    var network = docktailContainerInfo.networkMode || '';
+    if (network === 'host') {
+        target = '127.0.0.1:' + (route.targetPort || '<application port>') + ' (host network)';
+    } else if (network) {
+        if (docktailValue('service_direct') === '0') {
+            target = '127.0.0.1:<published host port for application TCP port ' + (route.targetPort || '?') + '; not resolved>';
+        } else if (network === 'none') {
+            target = 'unavailable: network mode none cannot use direct container IP';
+        } else {
+            target = '<container IP on ' + (docktailValue('service_network') || 'Docker-selected network')
+                + '; not resolved>:' + (route.targetPort || '<application port>');
+        }
+    }
+    $('#docktail_route_preview').text('Client → ' + frontend + '\nTailscale → ' + route.targetProtocol + ' → ' + target
+        + '\nFrontend TCP port ' + route.port + '; application port ' + (route.targetPort || 'not set')
+        + (route.protocol === 'tls-terminated-tcp' ? '\nTailscale terminates client TLS and forwards plain TCP.' : '')
+        + (docktailLoading ? '\nLoading container details…' : '')
+        + (docktailLoadFailed ? '\nContainer details unavailable; reload the selection before generating labels.' : ''));
+    docktailPolicy();
+}
+
+function docktailPolicy() {
+    var source = String($('#docktail_policy_source').val() || '').trim();
+    var email = function(value) { return /^[^\s@*:,<>]+@[^\s@*:,<>]+\.[^\s@*:,<>]+$/.test(value); };
+    var userIdentity = function(value) { return email(value) || /^[^\s@*:,<>]+@(?:github|passkey)$/.test(value); };
+    var group = /^group:[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source)
+        || (source.indexOf('group:') === 0 && email(source.slice(6)));
+    var user = group ? String($('#docktail_policy_test_user').val() || '').trim() : source;
+    $('#docktail_policy_test_user_row').toggleClass('docktail-hidden', !group);
+    $('#docktail_grant_out,#docktail_policy_test_out').val('');
+    $('#docktail_copy_grant,#docktail_copy_policy_test').prop('disabled', true);
+    var note = 'Enter an explicit Tailscale user login or existing group to generate a narrow grant.';
+    if (docktailValue('service_enable') !== '1' || docktailRemoving) {
+        note = 'No Tailscale Service access rule is needed for this form.';
+    } else if (docktailValidatedRevision !== docktailRevision) {
+        note = 'Waiting for valid, current Service labels. Nothing is applied or verified yet.';
+    } else if (group && !userIdentity(user)) {
+        note = 'Enter an actual group member login for the matching policy test.';
+    } else if ((group || userIdentity(source)) && userIdentity(user)) {
+        var route = docktailRoute();
+        $('#docktail_grant_out').val(JSON.stringify({src: [source], dst: ['svc:' + route.name], ip: ['tcp:' + Number(route.port)]}, null, 2));
+        $('#docktail_policy_test_out').val(JSON.stringify({src: user, proto: 'tcp', accept: ['svc:' + route.name + ':' + Number(route.port)]}, null, 2));
+        $('#docktail_copy_grant,#docktail_copy_policy_test').prop('disabled', false);
+        note = 'Merge these objects into the existing grants and tests arrays. The test checks policy access, not DNS, connectivity or application health.';
+    }
+    $('#docktail_policy_note').text(note);
+}
+
+function docktailInvalidate() {
+    clearTimeout(docktailGenTimer);
+    docktailRevision++;
+    docktailValidatedRevision = -1;
+    $('#docktail_labels_out,#docktail_grant_out,#docktail_policy_test_out').val('');
+    $('#docktail_copy_note,#docktail_merge_note,#docktail_policy_copy_note').text('');
+    $('#docktail_labels_errors,#docktail_labels_warnings').addClass('docktail-hidden').empty();
+    docktailPreview();
+    return docktailRevision;
+}
 
 /* Regenerated on every change: a Generate button meant the box could sit there
    showing a value that no longer matched the form. */
 function docktailGenerate() {
-    clearTimeout(docktailGenTimer);
+    docktailRemoving = false;
+    var revision = docktailInvalidate();
+    if (docktailLoading || docktailLoadFailed) return;
+    var form = $('#docktail_labels').serialize();
     docktailGenTimer = setTimeout(function() {
-        $.post('/plugins/docktail/labelgen.php', $('#docktail_labels').serialize() + '&action=generate', function(data) {
+        $.post('/plugins/docktail/labelgen.php', form + '&action=generate', function(data) {
+            if (revision !== docktailRevision || form !== $('#docktail_labels').serialize()) return;
             var errors = $('#docktail_labels_errors');
 
             if (data.errors && data.errors.length) {
@@ -1090,12 +1259,17 @@ function docktailGenerate() {
             }
 
             $('#docktail_labels_out').val(data.extraParams || '');
+            docktailValidatedRevision = revision;
+            docktailPolicy();
             // Written to its own element: the container picker's note reports the
             // load, and a regeneration must not wipe it.
             $('#docktail_merge_note').text(data.merged
                 ? 'Existing Extra Parameters preserved.'
                 : (data.hasTemplate ? '' : 'No dockerMan template found; labels only.'));
-        }, 'json');
+        }, 'json').fail(function() {
+            if (revision !== docktailRevision) return;
+            $('#docktail_labels_errors').text('Could not generate labels. Change a field or reload the container to retry.').removeClass('docktail-hidden');
+        });
     }, 150);
 }
 
@@ -1126,12 +1300,18 @@ function docktailResetForm() {
 function docktailLoadContainer() {
     var name = $('#docktail_container').val();
     var note = $('#docktail_container_note');
-
+    docktailLoading = !!name;
+    docktailLoadFailed = false;
+    docktailRemoving = false;
+    docktailContainerInfo = {};
+    docktailResetForm();
+    $('#docktail_labels').find('input,select,textarea').not('#docktail_container,[name="csrf_token"]').prop('disabled', !!name);
+    $('#docktail_ports').empty();
+    $('#docktail_port_note,#docktail_webui_note').text('');
+    $('#docktail_use_webui').addClass('docktail-hidden');
+    note.text(name ? 'Loading container details…' : '');
+    var revision = docktailInvalidate();
     if (!name) {
-        docktailResetForm();
-        $('#docktail_ports').empty();
-        $('#docktail_port_note').text('');
-        note.text('');
         docktailGenerate();
         return;
     }
@@ -1141,10 +1321,19 @@ function docktailLoadContainer() {
         action: 'load',
         container: name
     }, function(data) {
+        if (revision !== docktailRevision || name !== $('#docktail_container').val()) return;
+        docktailLoading = false;
+        $('#docktail_labels').find('input,select,textarea').prop('disabled', false);
+        if (!data.found) {
+            docktailLoadFailed = true;
+            note.text('Container details unavailable. Select the container again to retry.');
+            docktailPreview();
+            return;
+        }
+        docktailContainerInfo = data;
         var ports = data.ports || [];
-
-        // The form always describes the container that is selected now.
-        docktailResetForm();
+        $('#docktail_webui_note').text(data.webUiPort ? 'Template WebUI suggests port ' + data.webUiPort + ' (not verified).' : 'No template WebUI port suggestion.');
+        $('#docktail_use_webui').toggleClass('docktail-hidden', !data.webUiPort);
 
         $('#docktail_ports').html($.map(ports, function(p) {
             return '<option value="' + p + '"></option>';
@@ -1156,6 +1345,7 @@ function docktailLoadContainer() {
             : 'No TCP ports detected.');
 
         if (data.labelled) {
+            $('#docktail_labels [name="service_enable"]').val('0');
             // Load what the container already declares, so this is an edit.
             $.each(data.values, function(field, value) {
                 var el = $('#docktail_labels [name="' + field + '"]');
@@ -1176,7 +1366,14 @@ function docktailLoadContainer() {
         }
 
         docktailGenerate();
-    }, 'json');
+    }, 'json').fail(function() {
+        if (revision !== docktailRevision) return;
+        docktailLoading = false;
+        docktailLoadFailed = true;
+        $('#docktail_labels').find('input,select,textarea').prop('disabled', false);
+        note.text('Could not load container details. Select the container again to retry.');
+        docktailPreview();
+    });
 }
 
 /*
@@ -1192,12 +1389,19 @@ function docktailStrip() {
         note.text('Pick a container first.');
         return;
     }
+    if (docktailLoading || docktailLoadFailed) {
+        note.text('Load the current container details before removing labels.');
+        return;
+    }
+    docktailRemoving = true;
+    var revision = docktailInvalidate();
 
     $.post('/plugins/docktail/labelgen.php', {
         csrf_token: $('#docktail_labels input[name="csrf_token"]').val(),
         action: 'strip',
         container: container
     }, function(data) {
+        if (revision !== docktailRevision || container !== $('#docktail_container').val()) return;
         $('#docktail_labels_errors').addClass('docktail-hidden').empty();
         $('#docktail_labels_warnings').addClass('docktail-hidden').empty();
         $('#docktail_labels_out').val(data.extraParams || '');
@@ -1213,12 +1417,27 @@ function docktailStrip() {
         }
 
         $('#docktail_merge_note').text('');
-    }, 'json');
+    }, 'json').fail(function() {
+        if (revision !== docktailRevision) return;
+        note.text('Could not read Extra Parameters. Nothing to copy; try again.');
+    });
 }
 
 function docktailCopy() {
-    var text = $('#docktail_labels_out').val();
-    var note = $('#docktail_copy_note');
+    docktailCopyText('docktail_labels_out', 'docktail_copy_note');
+}
+
+function docktailCopyPolicy(kind) {
+    docktailPolicy();
+    if (docktailValidatedRevision !== docktailRevision || docktailRemoving) return;
+    docktailCopyText(kind === 'grant' ? 'docktail_grant_out' : 'docktail_policy_test_out', 'docktail_policy_copy_note');
+}
+
+function docktailCopyText(id, noteId) {
+    var text = $('#' + id).val();
+    var note = $('#' + noteId);
+    var revision = docktailRevision;
+    var current = function() { return revision === docktailRevision && text === $('#' + id).val(); };
 
     if (!text) {
         note.text('Nothing to copy.');
@@ -1226,7 +1445,8 @@ function docktailCopy() {
     }
 
     var fallback = function() {
-        var el = document.getElementById('docktail_labels_out');
+        if (!current()) return;
+        var el = document.getElementById(id);
         el.select();
         var ok = document.execCommand('copy');
         el.setSelectionRange(0, 0);
@@ -1237,12 +1457,12 @@ function docktailCopy() {
     // only as a fallback for non-secure contexts.
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).then(function() {
-            note.text('Copied.');
+            if (current()) note.text('Copied.');
         }, fallback);
     } else {
         fallback();
     }
-    setTimeout(function() { note.text(''); }, 4000);
+    setTimeout(function() { if (current()) note.text(''); }, 4000);
 }
 
 $(function() {
@@ -1276,6 +1496,15 @@ $(function() {
 
     $('#docktail_container').change(docktailLoadContainer);
     $('#docktail_labels').find('input,select,textarea').not('#docktail_container').on('input change', docktailGenerate);
+    $('#docktail_use_webui').on('click', function() {
+        if (docktailLoading || !docktailContainerInfo.webUiPort) return;
+        $('#docktail_service_port').val(docktailContainerInfo.webUiPort);
+        docktailGenerate();
+    });
+    $('#docktail_policy_source,#docktail_policy_test_user').on('input change', function() {
+        $('#docktail_policy_copy_note').text('');
+        docktailPolicy();
+    });
 
     docktailGenerate();
 });
