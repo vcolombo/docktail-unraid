@@ -258,19 +258,63 @@ final class ConnectionCheck
         $path = trim($labels[$prefix . 'path'] ?? '');
         $path = $path === '' ? '/' : $path;
         $proxy = $funnel ? '' : ($labels['docktail.service.proxy-protocol'] ?? '');
-        if ($backendPort === null || $frontendPort === null
-            || ! in_array($backend, Labels::TARGET_PROTOCOLS, true)
-            || ! in_array($frontend, Labels::SERVICE_PROTOCOLS, true)
-            || (! $funnel && preg_match('/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/D', $name) !== 1)
-            || strlen($path) > 1024 || ! str_starts_with($path, '/') || preg_match('/[\x00-\x20\x7f?#]/', $path)
-            || (! $http && array_key_exists($prefix . 'path', $labels))
-            || ($proxy !== '' && ($http || ! in_array($proxy, ['1', '2'], true)))
-            || ($funnel && $http && ! in_array((string) $frontendPort, Labels::FUNNEL_PORTS, true))) {
+        if ( ! self::endpointLabelsValid($labels, $prefix, $funnel, $http, $backend, $frontend, $backendPort, $frontendPort, $name, $path, $proxy)) {
             $this->add($funnel ? 'funnel-labels' : 'service-labels', $funnel ? 'Funnel labels' : 'Service labels', 'fail',
                 'Required port, protocol, name, path or PROXY protocol labels are invalid or unsupported.', 'Review this container on the Labels tab, apply the intended values, then retry.');
             return null;
         }
         return compact('backendPort', 'backend', 'frontend', 'frontendPort', 'http', 'path', 'proxy') + ['service' => 'svc:' . $name];
+    }
+
+    /**
+     * Validation for the resolved endpoint labels. Split out of endpoint() so
+     * each rule is named and independently readable; behavior is unchanged.
+     *
+     * @param array<string, string> $labels
+     */
+    private static function endpointLabelsValid(array $labels, string $prefix, bool $funnel, bool $http,
+        string $backend, string $frontend, ?int $backendPort, ?int $frontendPort, string $name, string $path, string $proxy): bool
+    {
+        if ($backendPort === null || $frontendPort === null) {
+            return false;
+        }
+        if ( ! in_array($backend, Labels::TARGET_PROTOCOLS, true)
+            || ! in_array($frontend, Labels::SERVICE_PROTOCOLS, true)) {
+            return false;
+        }
+        if ( ! $funnel && ! self::validServiceName($name)) {
+            return false;
+        }
+        if ( ! self::validPath($path)) {
+            return false;
+        }
+        // A path is meaningless for a non-HTTP frontend; carrying one is a
+        // misconfiguration, not something to silently ignore.
+        if ( ! $http && array_key_exists($prefix . 'path', $labels)) {
+            return false;
+        }
+        if ($proxy !== '' && ($http || ! in_array($proxy, ['1', '2'], true))) {
+            return false;
+        }
+        // Public Funnel ingress is restricted to the ports Tailscale opens.
+        if ($funnel && $http && ! in_array((string) $frontendPort, Labels::FUNNEL_PORTS, true)) {
+            return false;
+        }
+        return true;
+    }
+
+    /** RFC-1123-style single-label service name, mirroring the core's rule. */
+    private static function validServiceName(string $name): bool
+    {
+        return preg_match('/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/D', $name) === 1;
+    }
+
+    /** Absolute path, bounded length, no control characters or delimiters. */
+    private static function validPath(string $path): bool
+    {
+        return strlen($path) <= 1024
+            && str_starts_with($path, '/')
+            && preg_match('/[\x00-\x20\x7f?#]/', $path) !== 1;
     }
 
     /** Derive only a literal container IP or the core's host-loopback target. */

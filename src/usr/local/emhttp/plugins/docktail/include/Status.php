@@ -278,22 +278,44 @@ final class Status
      */
     public static function labelledContainers(): array
     {
+        return self::inspectLabelledContainers()['containers'];
+    }
+
+    /**
+     * Whether any running container's `docker inspect` failed during the last
+     * labelledContainers() pass. When true the enrolled list is incomplete, so
+     * an empty result must not be presented as confirmed "nothing enrolled".
+     */
+    public static function labelledContainersInspectionFailed(): bool
+    {
+        return self::inspectLabelledContainers()['inspectionFailed'];
+    }
+
+    /**
+     * Memoised sweep of running containers and their docktail.* labels.
+     *
+     * @return array{containers: list<array{id: string, name: string, labels: array<string, string>}>, inspectionFailed: bool}
+     */
+    private static function inspectLabelledContainers(): array
+    {
         static $cache = null;
         if ($cache !== null) {
             return $cache;
         }
-        $cache = [];
+
+        $empty = ['containers' => [], 'inspectionFailed' => false];
 
         if ( ! file_exists(self::DOCKER_SOCK) || ! file_exists(self::DOCKER_BIN)) {
-            return $cache;
+            return $cache = $empty;
         }
 
         $list = self::run(escapeshellarg(self::DOCKER_BIN) . " ps --format '{{.ID}} {{.Names}}'");
         if ($list['out'] === '') {
-            return $cache;
+            return $cache = $empty;
         }
 
-        $containers = [];
+        $containers       = [];
+        $inspectionFailed = false;
         foreach (explode("\n", $list['out']) as $line) {
             $line = trim($line);
             if ($line === '') {
@@ -307,6 +329,9 @@ final class Status
             $inspect = self::run(escapeshellarg(self::DOCKER_BIN) . ' inspect --format ' . escapeshellarg('{{json .Config.Labels}}') . ' ' . escapeshellarg($id));
             $labels  = json_decode($inspect['out'], true);
             if ($inspect['code'] !== 0 || ! is_array($labels)) {
+                // Keep the row excluded, but record that the enrolled list is
+                // now incomplete so the UI does not claim confirmed emptiness.
+                $inspectionFailed = true;
                 continue;
             }
 
@@ -324,9 +349,7 @@ final class Status
             $containers[] = ['id' => $id, 'name' => $name, 'labels' => $docktailLabels];
         }
 
-        $cache = $containers;
-
-        return $cache;
+        return $cache = ['containers' => $containers, 'inspectionFailed' => $inspectionFailed];
     }
 
     /**
@@ -400,6 +423,7 @@ final class Status
             'state'            => self::serviceState(),
             'preflight'        => self::preflight(),
             'rows'             => self::serviceRows($advertised['services'], $advertised['config']),
+            'inspectionFailed' => self::labelledContainersInspectionFailed(),
             'advertised'       => array_keys($advertised['services']),
             'serveStatusPlain' => $advertised['raw'],
             'serveUnreadable'  => $advertised['degraded'],
@@ -490,10 +514,17 @@ final class Status
 </blockquote>
 
 <?php if ($snapshot['rows'] === []) { ?>
+<?php if ( ! empty($snapshot['inspectionFailed'])) { ?>
+<div class="docktail-remedy">
+    Some running containers could not be inspected, so this list may be incomplete.
+    Refresh to retry; if it persists, check that Docker is healthy.
+</div>
+<?php } else { ?>
 <div class="docktail-remedy">
     No running container enables a DockTail Service or Funnel. Use the Labels tab to
     generate the labels, then paste them into the container's Extra Parameters field.
 </div>
+<?php } ?>
 <?php } else { ?>
 <table class="unraid tablesorter docktail-container-table">
 <thead><tr><th>Container</th><th>Service</th><th>Application port</th><th>Application protocol</th><th>Local proxy config</th><th>Connection</th></tr></thead>
@@ -509,7 +540,7 @@ final class Status
             <input type="button" class="docktail-check" value="Check connection" data-container="<?= h($row['id']); ?>" onclick="docktailCheck(this)">
         </td>
     </tr>
-    <tr class="docktail-check-detail docktail-hidden"><td colspan="6">
+    <tr class="docktail-check-detail docktail-hidden tablesorter-childRow"><td colspan="6">
         <input type="button" value="Dismiss" onclick="docktailInvalidateStatus(); $(this).closest('tr').prev().find('.docktail-check').trigger('focus')">
         <div class="docktail-check-result" role="status" aria-live="polite"></div>
     </td></tr>
