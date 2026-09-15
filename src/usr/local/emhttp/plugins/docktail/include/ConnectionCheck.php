@@ -231,13 +231,14 @@ final class ConnectionCheck
     private function endpoint(array $labels, bool $funnel): ?array
     {
         $prefix = $funnel ? 'docktail.funnel.' : 'docktail.service.';
-        $backendPort = self::port($labels[$prefix . 'port'] ?? '');
+        $rawBackendPort = $labels[$prefix . 'port'] ?? '';
+        $backendPort = self::port($rawBackendPort);
         $backend = $labels['docktail.service.protocol'] ?? '';
-        $backend = $backend === '' ? ($backendPort === 443 ? 'https' : 'http') : $backend;
+        $backend = $backend === '' ? ($rawBackendPort === '443' ? 'https' : 'http') : $backend;
         $frontend = $labels[$prefix . ($funnel ? 'protocol' : 'service-protocol')] ?? '';
         $port = $labels[$prefix . ($funnel ? 'funnel-port' : 'service-port')] ?? '';
         if ($funnel) {
-            $frontend = $frontend === '' ? 'https' : $frontend;
+            $frontend = $frontend === '' || $frontend === 'http' ? 'https' : $frontend;
             $port = $port === '' ? '443' : $port;
             $backend = in_array($frontend, ['tcp', 'tls-terminated-tcp'], true) ? 'tcp' : 'http';
         } else {

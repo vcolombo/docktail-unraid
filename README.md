@@ -79,9 +79,12 @@ The corresponding access grant targets **443**, not 4859:
 }
 ```
 
-Replace the example identity with an actual tailnet user or an existing group.
+Replace the example identity with an actual Tailscale user login: an email address,
+`username@github`, or `username@passkey`. Existing policy-defined groups such as
+`group:household` and synced groups such as `group:admins@example.com` are also
+supported. For a group, enter an actual member's login for the policy test.
 Merge the grant into the existing policy; do not replace the policy with this
-fragment. A policy test can use the actual user's email as `src` and
+fragment. A policy test uses the user's login as `src` and
 `["svc:homey:443"]` as `accept`.
 
 `docktail.funnel.*` labels additionally require **Allow Funnel** in the Tailscale

@@ -1071,10 +1071,12 @@ final class Labels
 </dl>
 <dl id="docktail_policy_test_user_row" class="docktail-hidden">
     <dt>User to test:</dt>
-    <dd><input type="text" id="docktail_policy_test_user" placeholder="Actual group member's email" autocomplete="off"></dd>
+    <dd><input type="text" id="docktail_policy_test_user" placeholder="Actual group member's Tailscale login" autocomplete="off"></dd>
 </dl>
-<p>Enter one real tailnet user email or an existing <code>group:name</code>. For a group,
-    define its membership in your policy and enter an actual member's email for the test.
+<p>Enter one real tailnet user login (email, <code>username@github</code> or
+    <code>username@passkey</code>) or an existing group such as <code>group:household</code>
+    or <code>group:admins@example.com</code>. For a group, use its existing policy-defined
+    or synced membership and enter an actual member's login for the test.
     No wildcard or default access is added.</p>
 <p id="docktail_policy_note"></p>
 <dl>
@@ -1188,20 +1190,22 @@ function docktailPreview() {
 
 function docktailPolicy() {
     var source = String($('#docktail_policy_source').val() || '').trim();
-    var group = /^group:[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source);
     var email = function(value) { return /^[^\s@*:,<>]+@[^\s@*:,<>]+\.[^\s@*:,<>]+$/.test(value); };
+    var userIdentity = function(value) { return email(value) || /^[^\s@*:,<>]+@(?:github|passkey)$/.test(value); };
+    var group = /^group:[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source)
+        || (source.indexOf('group:') === 0 && email(source.slice(6)));
     var user = group ? String($('#docktail_policy_test_user').val() || '').trim() : source;
     $('#docktail_policy_test_user_row').toggleClass('docktail-hidden', !group);
     $('#docktail_grant_out,#docktail_policy_test_out').val('');
     $('#docktail_copy_grant,#docktail_copy_policy_test').prop('disabled', true);
-    var note = 'Enter an explicit user email or existing group to generate a narrow grant.';
+    var note = 'Enter an explicit Tailscale user login or existing group to generate a narrow grant.';
     if (docktailValue('service_enable') !== '1' || docktailRemoving) {
         note = 'No Tailscale Service access rule is needed for this form.';
     } else if (docktailValidatedRevision !== docktailRevision) {
         note = 'Waiting for valid, current Service labels. Nothing is applied or verified yet.';
-    } else if (group && !email(user)) {
-        note = 'Enter an actual group member email for the matching policy test.';
-    } else if ((group || email(source)) && email(user)) {
+    } else if (group && !userIdentity(user)) {
+        note = 'Enter an actual group member login for the matching policy test.';
+    } else if ((group || userIdentity(source)) && userIdentity(user)) {
         var route = docktailRoute();
         $('#docktail_grant_out').val(JSON.stringify({src: [source], dst: ['svc:' + route.name], ip: ['tcp:' + Number(route.port)]}, null, 2));
         $('#docktail_policy_test_out').val(JSON.stringify({src: user, proto: 'tcp', accept: ['svc:' + route.name + ':' + Number(route.port)]}, null, 2));
