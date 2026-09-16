@@ -137,10 +137,15 @@ final class Config
      * nothing rewrites it until the person next presses Apply.
      *
      * PHP's ini parser never expanded these values, so what it reads back is
-     * the author's literal text - re-writing it escaped is the whole fix. A
-     * backtick is dropped instead, matching coerceSecrets(): the key is
-     * removed rather than emptied, so a setting falls back to default.cfg
-     * instead of overriding it with nothing.
+     * the author's literal text - re-writing it escaped is the whole fix.
+     *
+     * A backtick is dropped, and dropped differently from coerceSecrets(),
+     * which writes every secret key and stores '' for a refused one so the
+     * settings page shows the field empty. Here the key is removed outright:
+     * this runs with nobody watching, and an empty LOG_LEVEL would override
+     * default.cfg with nothing, where an absent one falls back to the shipped
+     * value. A credential ends up the same either way - read() fills a missing
+     * secret with ''.
      *
      * A file that is missing or unparseable is left alone; there is nothing to
      * normalise and overwriting it would lose settings.
@@ -541,21 +546,41 @@ final class Config
  * serialize() keeps the hidden csrf_token field, which Unraid's
  * auto_prepend_file requires on every POST.
  */
+var docktailApplyRequest = null;
+var docktailApplyDirty = false;
+
+// An edit means the form no longer matches what was last written, so Apply has
+// to be usable whatever the previous answer was - otherwise a change made just
+// after a clean save, or while one was in flight, cannot be submitted without
+// reloading the tab.
+$(function() {
+    $('#docktail_settings').on('input change', 'input, select', function() {
+        docktailApplyDirty = true;
+        if ( ! docktailApplyRequest) {
+            $('#docktail_settings').find('input[value="Apply"]').prop('disabled', false);
+        }
+    });
+});
+
 function docktailApply() {
     var form = $('#docktail_settings');
     var out = $('#docktail_apply_result');
     var apply = form.find('input[value="Apply"]');
 
+    // One save at a time. Disabling Apply is not the guard: this function is
+    // reachable programmatically and from a form submit, and two answers
+    // arriving out of order would describe values the form no longer holds.
+    if (docktailApplyRequest) {
+        return;
+    }
+
+    docktailApplyDirty = false;
     out.removeClass('docktail-apply-error').text('Saving...');
-    // Disarmed for the flight, so a second submission cannot overlap the
-    // first: two answers arriving out of order would leave the button in a
-    // state that belongs to values the form no longer holds.
     apply.prop('disabled', true);
 
-    // Bounded like the Status tab's POSTs: the save returns immediately (the
-    // restart is deferred), and Apply is disarmed until an answer arrives, so
-    // a request left pending must time out or the form stays dead.
-    $.ajax({
+    // Bounded like the Status tab's POSTs: Apply is disarmed until an answer
+    // arrives, so a request left pending must time out or the form stays dead.
+    docktailApplyRequest = $.ajax({
         url: form.attr('action'),
         type: 'POST',
         timeout: 25000,
@@ -564,20 +589,29 @@ function docktailApply() {
         .done(function(data, status, xhr) {
             // A refused value is a partial save: flag it like a failure and
             // rearm Apply, because the person has a value to correct and would
-            // otherwise have to reload the tab to resubmit it.
+            // otherwise have to reload the tab to resubmit it. An edit made
+            // while this was in flight rearms it for the same reason.
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
             out.toggleClass('docktail-apply-error', !!refused)
                .text(String(data).trim() || 'Settings saved.');
-            apply.prop('disabled', ! refused);
+            apply.prop('disabled', ! refused && ! docktailApplyDirty);
         })
         .fail(function(xhr, status) {
             var detail = status === 'timeout'
-                ? 'the request timed out. Check /var/log/docktail.log, then retry.'
+                ? 'the request timed out. It may still have been applied - reload the tab to '
+                  + 'see what is stored before retrying.'
                 : xhr.status === 403
                     ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
                     : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
             out.addClass('docktail-apply-error').text('Could not save: ' + detail);
+            // Rearmed: a browser-side timeout says nothing about what the
+            // server did, and a form that can never be submitted again is
+            // worse than a retry that may repeat a write which is atomic
+            // anyway - writeFile() renames into place.
             apply.prop('disabled', false);
+        })
+        .always(function() {
+            docktailApplyRequest = null;
         });
 }
 </script>
