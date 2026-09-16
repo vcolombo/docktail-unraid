@@ -42,6 +42,14 @@ final class Config
     ];
 
     /**
+     * Settings DockTail reads as a comma-separated list, where one bad entry
+     * is dropped rather than the whole value - see normalizeList().
+     *
+     * @var list<string>
+     */
+    public const LIST_SETTINGS = ['DEFAULT_SERVICE_TAGS', 'IGNORE_SERVICE_NAMES'];
+
+    /**
      * Every field whose value reaches a config file as free text, so every
      * field where a backtick can be refused - see containsBacktick(). The
      * labels are what the settings page calls them below, because a refusal is
@@ -148,10 +156,20 @@ final class Config
      * secret with ''.
      *
      * A file that is missing or unparseable is left alone; there is nothing to
-     * normalise and overwriting it would lose settings.
+     * normalise and overwriting it would lose settings. Nothing is written
+     * unless the escaped rendering actually differs from what is on the flash:
+     * Unraid reinstalls the package on every boot, so an unconditional rewrite
+     * would burn a flash write and recreate the credential temp file each
+     * time, forever.
+     *
+     * @return bool false only when a file that needed converting could not be
+     *              written - the caller has to say so, because rc.docktail
+     *              would go on sourcing the raw values
      */
-    public static function normalizeStoredFiles(): void
+    public static function normalizeStoredFiles(): bool
     {
+        $ok = true;
+
         foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
             $values = self::readFile($file);
             if ($values === []) {
@@ -159,13 +177,30 @@ final class Config
             }
 
             foreach ($values as $key => $value) {
-                if (self::containsBacktick($value)) {
-                    unset($values[$key]);
+                if ( ! self::containsBacktick($value)) {
+                    continue;
                 }
+
+                // A list keeps its clean entries, exactly as coerceSettings()
+                // treats one: dropping the whole key would silently stop
+                // ignoring services the person asked DockTail to leave alone.
+                $cleaned = in_array($key, self::LIST_SETTINGS, true) ? self::normalizeList($value) : '';
+                if ($cleaned === '') {
+                    unset($values[$key]);
+                    continue;
+                }
+
+                $values[$key] = $cleaned;
             }
 
-            self::writeFile($file, $values, $mode);
+            if (self::renderBody($values) === @file_get_contents($file)) {
+                continue;
+            }
+
+            $ok = self::writeFile($file, $values, $mode) && $ok;
         }
+
+        return $ok;
     }
 
     /**
@@ -187,7 +222,7 @@ final class Config
      *
      * @param array<string, string> $values
      */
-    private static function writeFile(string $file, array $values, int $mode): bool
+    private static function renderBody(array $values): string
     {
         $body = '';
         foreach ($values as $key => $value) {
@@ -199,6 +234,13 @@ final class Config
             $body .= sprintf("%s=\"%s\"\n", $key, $escaped);
         }
 
+        return $body;
+    }
+
+    /** @param array<string, string> $values */
+    private static function writeFile(string $file, array $values, int $mode): bool
+    {
+        $body = self::renderBody($values);
         $tmp = $file . '.tmp';
         if (@file_put_contents($tmp, $body) === false) {
             return false;
