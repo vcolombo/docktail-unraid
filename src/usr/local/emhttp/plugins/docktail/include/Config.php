@@ -57,8 +57,10 @@ final class Config
      * Every field whose value reaches a config file as free text, so every
      * field where a backtick can be refused - see containsBacktick(). The
      * labels are what the settings page calls them below, because a refusal is
-     * reported to the person looking at that form, not at the cfg file. A new
-     * free-text setting belongs here as well as in SETTING_KEYS.
+     * reported to the person looking at that form, not at the cfg file. This
+     * is the reporting list only: a new free-text field belongs here and in
+     * the list that actually persists it, SECRET_KEYS for a credential or
+     * SETTING_KEYS for a setting.
      *
      * @var array<string, string>
      */
