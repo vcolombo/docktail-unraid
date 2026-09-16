@@ -25,29 +25,51 @@ log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
 }
 
-# A config file is safe to source only if nothing in it can be expanded. The
-# webGUI escapes $ as \$ and refuses backticks outright, but this is the
-# consumer and it does not get to assume that: a file written by an older
-# plugin version, hand-edited on the flash, or left unconverted by a failed
-# migration would otherwise run command substitution as root at every boot.
+# These files are data, not code. Sourcing them made bash the parser, which
+# meant every character in a stored credential was a potential command: a $ or
+# a backtick from an older plugin version, and with a blacklist check, any
+# plain command a hand-edited file cared to include. So they are read instead.
 #
-# Escaped sequences are removed first, so a legitimate \$ in a credential
-# passes; anything expandable left after that is refused.
-config_is_safe() {
-  ! sed -e 's/\\\\//g' -e 's/\\\$//g' "$1" | grep -q '[`$]'
+# Only KEY="value" is recognised - the exact grammar the webGUI writes - and a
+# line that is not that is logged and skipped rather than guessed at. Values
+# are assigned with declare, which does not re-expand what it is given, so a
+# legacy value like x$(id)y arrives as those literal characters.
+read_config() {
+  local file="$1" line key value
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Trailing CR, so a file that has been through a Windows editor still reads.
+    line="${line%$'\r'}"
+
+    case "$line" in
+      '' | '#'*) continue ;;
+    esac
+
+    if [[ ! "$line" =~ ^([A-Z][A-Z0-9_]*)=\"(.*)\"$ ]]; then
+      log "Ignoring an unrecognised line in $file: only KEY=\"value\" is read."
+      continue
+    fi
+
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+
+    # Undo exactly what the webGUI's renderBody() escapes, and nothing else.
+    # An escaped backslash is parked on a byte that cannot appear in the file
+    # first, so \\$ does not turn into an unescape of \$.
+    value="${value//\\\\/$'\x01'}"
+    value="${value//\\\"/\"}"
+    value="${value//\\\$/\$}"
+    value="${value//$'\x01'/\\}"
+
+    declare -g "$key=$value"
+  done < "$file"
 }
 
 load_config() {
-  # Defaults first, user settings on top, then secrets. Each is plain
-  # KEY="value"; a file that is anything else is skipped rather than trusted.
+  # Defaults first, user settings on top, then secrets.
   local file
   for file in "${PLUGIN_ROOT}/default.cfg" "${CONFIG_DIR}/docktail.cfg" "${CONFIG_DIR}/credentials.cfg"; do
-    [ -f "$file" ] || continue
-    if config_is_safe "$file"; then
-      . "$file"
-    else
-      log "Refusing to source $file: it contains an unescaped \$ or a backtick, which bash would expand. Open the DockTail settings and press Apply to rewrite it."
-    fi
+    [ -f "$file" ] && read_config "$file"
   done
   return 0
 }

@@ -4,21 +4,21 @@
 chmod 0644 /etc/logrotate.d/docktail
 chown root:root /etc/logrotate.d/docktail
 
-# Values written before the plugin escaped $ are still unescaped on the flash,
-# and nothing rewrites them until the next Apply, so normalise them here. This
-# runs on every boot, with the rewrite itself a no-op once converted.
+# Values written before the plugin escaped $ are still unescaped on the flash.
+# rc.docktail reads rather than sources them, so they are no longer dangerous,
+# but PHP's reader and the shell's reader only agree on the escaped form - so
+# normalise them here. This runs on every boot, and the rewrite is a no-op once
+# converted.
 #
 # Both outcomes are said out loud, because neither is visible anywhere else:
-# a value dropped for containing a backtick, and a file that needed converting
-# but could not be written - rc.docktail then goes on sourcing the raw values,
-# where a $ is expanded and a backtick makes bash abandon the rest of the file.
-# Neither is fatal to the install.
+# a value dropped for carrying a backtick or a line break, and a file that
+# needed converting but could not be written. Neither is fatal to the install.
 php -r '
   require "/usr/local/emhttp/plugins/docktail/include/common.php";
   $r = \DockTail\Config::normalizeStoredFiles();
   foreach ($r["dropped"] as $field) {
-      echo "docktail: dropped the stored $field - it contained a backtick, which cannot be written to a file the service sources\n";
+      echo "docktail: dropped the stored $field - it contained a backtick or a line break, which cannot be stored in these files\n";
   }
   exit($r["ok"] ? 0 : 1);
 ' 2>/dev/null \
-  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; until the next Apply a stored \$ is still expanded and a stored backtick still blanks every later setting"
+  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail still reads it, but a value written with an unescaped \$ arrives with that \$ intact only after the next Apply"

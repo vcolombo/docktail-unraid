@@ -56,7 +56,7 @@ final class Config
 
     /**
      * Every field whose value reaches a config file as free text, so every
-     * field where a backtick can be refused - see containsBacktick(). The
+     * field where a value can be refused - see containsUnstorable(). The
      * labels are what the settings page calls them below, because a refusal is
      * reported to the person looking at that form, not at the cfg file. This
      * is the reporting list only: a new free-text field belongs here and in
@@ -185,14 +185,15 @@ final class Config
      * PHP's ini parser never expanded these values, so what it reads back is
      * the author's literal text - re-writing it escaped is the whole fix.
      *
-     * A backtick is dropped, and dropped differently from coerceSecrets(),
-     * which writes every secret key and stores '' for a refused one so the
-     * settings page shows the field empty. Here the key is removed outright:
-     * this runs with nobody watching, and an empty LOG_LEVEL would override
-     * default.cfg with nothing, where an absent one falls back to the shipped
-     * value. A credential ends up the same either way - read() fills a missing
-     * secret with ''. Which fields went is returned rather than swallowed: an
-     * upgrade that empties a saved credential has to say so.
+     * An unstorable value is dropped, and dropped differently from
+     * coerceSecrets(), which writes every secret key and stores '' for a
+     * refused one so the settings page shows the field empty. Here the key is
+     * removed outright: this runs with nobody watching, and an empty
+     * LOG_LEVEL would override default.cfg with nothing, where an absent one
+     * falls back to the shipped value. A credential ends up the same either
+     * way - read() fills a missing secret with ''. Which fields went is
+     * returned rather than swallowed: an upgrade that empties a saved
+     * credential has to say so.
      *
      * A file that is missing or unparseable is left alone; there is nothing to
      * normalise and overwriting it would lose settings. Nothing is written
@@ -220,7 +221,7 @@ final class Config
 
                 $lost = [];
                 foreach ($values as $key => $value) {
-                    if ( ! self::containsBacktick($value)) {
+                    if ( ! self::containsUnstorable($value)) {
                         continue;
                     }
 
@@ -261,19 +262,23 @@ final class Config
     /**
      * A value written here is read back by two different parsers: PHP's
      * parse_ini_file() (and Unraid's own parse_plugin_cfg()) on this side, and
-     * bash on the other, because rc.docktail sources all three config files
-     * with `.` to put them in DockTail's environment.
+     * rc.docktail's own KEY="value" reader on the other, which unescapes `\\`,
+     * `\"` and `\$` and nothing else.
      *
-     * Bash expands `$` and backticks inside a double-quoted assignment, so a
-     * stored value has to be escaped against that or it is not data any more.
-     * Both parsers agree on `\\` and `\"`, and both read `\$` back as a plain
-     * `$`, so those three are escaped here.
+     * Those three are what is escaped here, and the set is not arbitrary: they
+     * are exactly what both readers agree on. PHP's ini parser reads `\$` back
+     * as a plain `$`, so a credential containing one survives the round trip
+     * intact.
      *
-     * A backtick is escaped by neither: bash reads `\`` as a literal backtick,
-     * but PHP's ini parser keeps the backslash, so any escaping that fixes one
-     * side corrupts the other. There is no value to write that satisfies both,
-     * so a backtick is refused at validation time instead - see
-     * containsBacktick() and its callers below.
+     * rc.docktail used to source these files, which made bash the parser and
+     * every `$` in a credential a command substitution. It does not any more,
+     * so this escaping is no longer what separates data from code - but it is
+     * still what keeps the file safe for anything that does source it, and
+     * what keeps PHP's reader and the shell's reader agreeing.
+     *
+     * A backtick and a line break cannot be spelled in a way both readers
+     * accept, so they are refused at validation time instead - see
+     * containsUnstorable() and its callers below.
      *
      * @param array<string, string> $values
      */
@@ -333,7 +338,7 @@ final class Config
         $tailnet = trim((string) ($post['TAILSCALE_TAILNET'] ?? ''));
         // "-" is DockTail's own "whichever tailnet the credentials belong to",
         // which is the right thing to fall back to for a value we refuse.
-        if ($tailnet === '' || self::containsBacktick($tailnet)) {
+        if ($tailnet === '' || self::containsUnstorable($tailnet)) {
             $tailnet = '-';
         }
         $out['TAILSCALE_TAILNET'] = $tailnet;
@@ -368,34 +373,43 @@ final class Config
             // Dropped rather than stored, and reported by apply.php through
             // refusedFields(): keeping the previous value would be worse - the
             // person would believe a credential was saved that was not.
-            $out[$key] = self::containsBacktick($value) ? '' : $value;
+            $out[$key] = self::containsUnstorable($value) ? '' : $value;
         }
 
         return $out;
     }
 
     /**
-     * A backtick cannot be written to these files safely, because rc.docktail
-     * sources them with bash while PHP reads them back with parse_ini_file(),
-     * and the two disagree about what `\`` means. Left unescaped it is worse
-     * than an injection: bash aborts the whole file on the unmatched backtick,
-     * so every setting after it silently reads as empty.
+     * A value that cannot be stored in these files at all.
      *
-     * `$` is NOT rejected here - writeFile() escapes it in a form both parsers
-     * agree on, so a credential containing one is stored and read back intact.
+     * A line break, because rc.docktail reads them one KEY="value" line at a
+     * time: a value carrying a newline would be an unrecognised line and get
+     * skipped, losing the setting rather than storing it.
+     *
+     * A backtick, because PHP's ini parser keeps the backslash of an escaped
+     * one while bash strips it, so there is no single spelling both readers
+     * agree on. rc.docktail no longer sources these files, so this is no
+     * longer the difference between data and code - but a file that stays
+     * safe to source is worth keeping, and a value nobody can round-trip is
+     * not worth storing.
+     *
+     * `$` is not in here: renderBody() escapes it as `\$`, which PHP reads
+     * back as a plain `$` and rc.docktail unescapes the same way, so a
+     * credential containing one is stored and read back intact.
      */
-    private static function containsBacktick(string $value): bool
+    private static function containsUnstorable(string $value): bool
     {
-        return strpos($value, '`') !== false;
+        return strpbrk($value, "`\r\n") !== false;
     }
 
     /**
-     * The fields of a POST carrying a backtick, labelled as the settings page
-     * labels them, so apply.php can say which value it dropped. A refusal has
-     * to be spoken: an emptied credential behind a bare "Settings saved."
-     * leaves the same wrong belief as keeping the old value would.
+     * The fields of a POST carrying a value that cannot be stored, labelled as
+     * the settings page labels them, so apply.php can say which value it
+     * dropped. A refusal has to be spoken: an emptied credential behind a bare
+     * "Settings saved." leaves the same wrong belief as keeping the old value
+     * would.
      *
-     * Only the backtick rule is reported. The other coercions replace a bad
+     * Only that rule is reported. The other coercions replace a bad
      * value with a stated default the page shows on its next render -
      * RECONCILE_INTERVAL falling back to 60s, say - so they speak for
      * themselves; an emptied password field does not.
@@ -407,7 +421,7 @@ final class Config
     {
         $refused = [];
         foreach (self::REFUSABLE_FIELDS as $key => $label) {
-            if (self::containsBacktick(trim((string) ($post[$key] ?? '')))) {
+            if (self::containsUnstorable(trim((string) ($post[$key] ?? '')))) {
                 $refused[] = $label;
             }
         }
@@ -419,7 +433,7 @@ final class Config
     {
         $parts = array_filter(
             array_map('trim', explode(',', $value)),
-            static fn (string $p): bool => $p !== '' && ! self::containsBacktick($p)
+            static fn (string $p): bool => $p !== '' && ! self::containsUnstorable($p)
         );
 
         return implode(',', array_unique($parts));
@@ -505,9 +519,10 @@ final class Config
     <code>0600</code>, which the plugin excludes from Unraid Connect's flash backup so it is
     never uploaded to the cloud.
     <br><br>
-    A backtick in a credential is refused rather than stored: the service reads this file as
-    a shell script, and a single backtick would blank every setting after it. Every other
-    character, <code>$</code> included, is stored as typed; spaces at either end are trimmed.
+    A backtick or a line break in a credential is refused rather than stored: the service
+    reads this file one <code>KEY="value"</code> line at a time, and neither survives that
+    round trip. Every other character, <code>$</code> included, is stored as typed; spaces at
+    either end are trimmed.
 </blockquote>
 
 <dl>
