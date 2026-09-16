@@ -33,6 +33,11 @@ final class Config
     public const SETTINGS_FILE    = CONFIG_DIR . '/docktail.cfg';
     public const CREDENTIALS_FILE = CONFIG_DIR . '/credentials.cfg';
 
+    // /tmp, not the flash: the lock is taken on every save and every boot, and
+    // none of that should cost a write to the USB stick. /tmp is always
+    // present and RAM-backed on Unraid, where /var/lock is not guaranteed.
+    public const LOCK_FILE = '/tmp/docktail-config.lock';
+
     /** @var list<string> */
     public const SECRET_KEYS = [
         'TAILSCALE_OAUTH_CLIENT_ID',
@@ -131,18 +136,51 @@ final class Config
             return false;
         }
 
-        $ok = self::writeFile(self::SETTINGS_FILE, $settings, 0644);
-        $ok = self::writeFile(self::CREDENTIALS_FILE, $secrets, 0600) && $ok;
+        return self::withLock(static function () use ($settings, $secrets): bool {
+            $ok = self::writeFile(self::SETTINGS_FILE, $settings, 0644);
 
-        return $ok;
+            return self::writeFile(self::CREDENTIALS_FILE, $secrets, 0600) && $ok;
+        });
+    }
+
+    /**
+     * Serialise everything that rewrites the pair of config files. Per-file
+     * atomicity is not enough on its own: two writers interleaving their
+     * renames would leave docktail.cfg from one submission beside
+     * credentials.cfg from another, and the migration below is a
+     * read-modify-write that would otherwise clobber an Apply landing between
+     * its read and its rename.
+     *
+     * The lock lives in /var/lock rather than beside the configs, so taking it
+     * costs no flash write. It fails open: an unobtainable lock must not stop
+     * somebody saving their settings.
+     *
+     * @template T
+     * @param  callable(): T $work
+     * @return T
+     */
+    private static function withLock(callable $work)
+    {
+        $handle = @fopen(self::LOCK_FILE, 'c');
+        if ($handle === false) {
+            return $work();
+        }
+
+        @flock($handle, LOCK_EX);
+        try {
+            return $work();
+        } finally {
+            @flock($handle, LOCK_UN);
+            @fclose($handle);
+        }
     }
 
     /**
      * Re-write both files through writeFile(), so a value stored by a plugin
      * version that escaped only \ and " stops being expanded when rc.docktail
-     * sources it. Run once per install from doinst.sh: escaping new writes
-     * does nothing for the credential already sitting on the flash, and
-     * nothing rewrites it until the person next presses Apply.
+     * sources it. Run from doinst.sh: escaping new writes does nothing for the
+     * credential already sitting on the flash, and nothing rewrites it until
+     * the person next presses Apply.
      *
      * PHP's ini parser never expanded these values, so what it reads back is
      * the author's literal text - re-writing it escaped is the whole fix.
@@ -153,7 +191,8 @@ final class Config
      * this runs with nobody watching, and an empty LOG_LEVEL would override
      * default.cfg with nothing, where an absent one falls back to the shipped
      * value. A credential ends up the same either way - read() fills a missing
-     * secret with ''.
+     * secret with ''. Which fields went is returned rather than swallowed: an
+     * upgrade that empties a saved credential has to say so.
      *
      * A file that is missing or unparseable is left alone; there is nothing to
      * normalise and overwriting it would lose settings. Nothing is written
@@ -162,45 +201,52 @@ final class Config
      * would burn a flash write and recreate the credential temp file each
      * time, forever.
      *
-     * @return bool false only when a file that needed converting could not be
-     *              written - the caller has to say so, because rc.docktail
-     *              would go on sourcing the raw values
+     * @return array{ok: bool, dropped: list<string>} ok is false only when a
+     *         file that needed converting could not be written, because
+     *         rc.docktail would go on sourcing the raw values; dropped names
+     *         the fields whose value did not survive
      */
-    public static function normalizeStoredFiles(): bool
+    public static function normalizeStoredFiles(): array
     {
-        $ok = true;
+        return self::withLock(static function (): array {
+            $ok      = true;
+            $dropped = [];
 
-        foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
-            $values = self::readFile($file);
-            if ($values === []) {
-                continue;
-            }
-
-            foreach ($values as $key => $value) {
-                if ( ! self::containsBacktick($value)) {
+            foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
+                $values = self::readFile($file);
+                if ($values === []) {
                     continue;
                 }
 
-                // A list keeps its clean entries, exactly as coerceSettings()
-                // treats one: dropping the whole key would silently stop
-                // ignoring services the person asked DockTail to leave alone.
-                $cleaned = in_array($key, self::LIST_SETTINGS, true) ? self::normalizeList($value) : '';
-                if ($cleaned === '') {
-                    unset($values[$key]);
+                foreach ($values as $key => $value) {
+                    if ( ! self::containsBacktick($value)) {
+                        continue;
+                    }
+
+                    // A list keeps its clean entries, exactly as
+                    // coerceSettings() treats one: dropping the whole key
+                    // would silently stop ignoring services the person asked
+                    // DockTail to leave alone.
+                    $cleaned = in_array($key, self::LIST_SETTINGS, true) ? self::normalizeList($value) : '';
+                    $dropped[] = self::REFUSABLE_FIELDS[$key] ?? $key;
+
+                    if ($cleaned === '') {
+                        unset($values[$key]);
+                        continue;
+                    }
+
+                    $values[$key] = $cleaned;
+                }
+
+                if (self::renderBody($values) === @file_get_contents($file)) {
                     continue;
                 }
 
-                $values[$key] = $cleaned;
+                $ok = self::writeFile($file, $values, $mode) && $ok;
             }
 
-            if (self::renderBody($values) === @file_get_contents($file)) {
-                continue;
-            }
-
-            $ok = self::writeFile($file, $values, $mode) && $ok;
-        }
-
-        return $ok;
+            return ['ok' => $ok, 'dropped' => $dropped];
+        });
     }
 
     /**

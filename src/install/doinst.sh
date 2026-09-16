@@ -8,8 +8,17 @@ chown root:root /etc/logrotate.d/docktail
 # and nothing rewrites them until the next Apply, so normalise them here. This
 # runs on every boot, with the rewrite itself a no-op once converted.
 #
-# Not fatal - a config that cannot be parsed is left exactly as it is - but a
-# file that needed converting and could not be written is said out loud, since
-# rc.docktail then goes on sourcing the raw values.
-php -r 'require "/usr/local/emhttp/plugins/docktail/include/common.php"; exit(\DockTail\Config::normalizeStoredFiles() ? 0 : 1);' >/dev/null 2>&1 \
-  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; a \$ in a stored value will still be expanded when the service starts"
+# Both outcomes are said out loud, because neither is visible anywhere else:
+# a value dropped for containing a backtick, and a file that needed converting
+# but could not be written - rc.docktail then goes on sourcing the raw values,
+# where a $ is expanded and a backtick makes bash abandon the rest of the file.
+# Neither is fatal to the install.
+php -r '
+  require "/usr/local/emhttp/plugins/docktail/include/common.php";
+  $r = \DockTail\Config::normalizeStoredFiles();
+  foreach ($r["dropped"] as $field) {
+      echo "docktail: dropped the stored $field - it contained a backtick, which cannot be written to a file the service sources\n";
+  }
+  exit($r["ok"] ? 0 : 1);
+' 2>/dev/null \
+  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; until the next Apply a stored \$ is still expanded and a stored backtick still blanks every later setting"
