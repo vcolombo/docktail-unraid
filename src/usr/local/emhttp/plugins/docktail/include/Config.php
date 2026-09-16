@@ -34,18 +34,6 @@ final class Config
     public const CREDENTIALS_FILE = CONFIG_DIR . '/credentials.cfg';
 
     /** @var list<string> */
-    public const SETTING_KEYS = [
-        'ENABLE_DOCKTAIL',
-        'TAILSCALE_TAILNET',
-        'DEFAULT_SERVICE_TAGS',
-        'IGNORE_SERVICE_NAMES',
-        'DELETE_UNUSED_SERVICES',
-        'SKIP_SHUTDOWN_CLEANUP',
-        'RECONCILE_INTERVAL',
-        'LOG_LEVEL',
-    ];
-
-    /** @var list<string> */
     public const SECRET_KEYS = [
         'TAILSCALE_OAUTH_CLIENT_ID',
         'TAILSCALE_OAUTH_CLIENT_SECRET',
@@ -59,8 +47,8 @@ final class Config
      * labels are what the settings page calls them below, because a refusal is
      * reported to the person looking at that form, not at the cfg file. This
      * is the reporting list only: a new free-text field belongs here and in
-     * the list that actually persists it, SECRET_KEYS for a credential or
-     * SETTING_KEYS for a setting.
+     * the coercion that actually persists it - coerceSecrets() for a
+     * credential, coerceSettings() for a setting.
      *
      * @var array<string, string>
      */
