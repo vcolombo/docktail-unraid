@@ -34,6 +34,36 @@ log() {
 # line that is not that is logged and skipped rather than guessed at. Values
 # are assigned with declare, which does not re-expand what it is given, so a
 # legacy value like x$(id)y arrives as those literal characters.
+# Undo exactly what the webGUI's renderBody() escapes - \\, \" and \$ - and
+# nothing else, left to right in one pass. Answers in REPLY.
+#
+# Done character by character rather than with substitutions: parking escaped
+# backslashes on a placeholder byte would corrupt any value that legitimately
+# contained that byte, and a legacy file can contain anything.
+unescape_value() {
+  local in="$1" out="" head next
+
+  while [ -n "$in" ]; do
+    head="${in:0:1}"
+
+    if [ "$head" = '\' ] && [ "${#in}" -gt 1 ]; then
+      next="${in:1:1}"
+      case "$next" in
+        '\' | '"' | '$')
+          out="${out}${next}"
+          in="${in:2}"
+          continue
+          ;;
+      esac
+    fi
+
+    out="${out}${head}"
+    in="${in:1}"
+  done
+
+  REPLY="$out"
+}
+
 read_config() {
   local file="$1" line key value
 
@@ -53,13 +83,8 @@ read_config() {
     key="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
 
-    # Undo exactly what the webGUI's renderBody() escapes, and nothing else.
-    # An escaped backslash is parked on a byte that cannot appear in the file
-    # first, so \\$ does not turn into an unescape of \$.
-    value="${value//\\\\/$'\x01'}"
-    value="${value//\\\"/\"}"
-    value="${value//\\\$/\$}"
-    value="${value//$'\x01'/\\}"
+    unescape_value "$value"
+    value="$REPLY"
 
     declare -g "$key=$value"
   done < "$file"

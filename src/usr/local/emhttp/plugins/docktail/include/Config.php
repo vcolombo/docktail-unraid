@@ -33,10 +33,11 @@ final class Config
     public const SETTINGS_FILE    = CONFIG_DIR . '/docktail.cfg';
     public const CREDENTIALS_FILE = CONFIG_DIR . '/credentials.cfg';
 
-    // /tmp, not the flash: the lock is taken on every save and every boot, and
-    // none of that should cost a write to the USB stick. /tmp is always
-    // present and RAM-backed on Unraid, where /var/lock is not guaranteed.
-    public const LOCK_FILE = '/tmp/docktail-config.lock';
+    // /var/run, not /tmp and not the flash: /tmp is world-writable, so any
+    // local process could create this file first and hold it, and a blocking
+    // wait on it would stall every Apply. /var/run is root-owned, and the
+    // plugin already keeps its pidfile there.
+    public const LOCK_FILE = '/var/run/docktail-config.lock';
 
     /** @var list<string> */
     public const SECRET_KEYS = [
@@ -125,18 +126,21 @@ final class Config
 
     /**
      * Persist both files. Written to a temporary file and renamed, so a
-     * concurrent rc.docktail start never sources a half-written config.
+     * concurrent rc.docktail read never sees a half-written config.
      *
      * @param array<string, string> $settings
      * @param array<string, string> $secrets
      */
     public static function write(array $settings, array $secrets): bool
     {
-        if ( ! is_dir(CONFIG_DIR) && ! @mkdir(CONFIG_DIR, 0755, true)) {
-            return false;
-        }
-
         return self::withLock(static function () use ($settings, $secrets): bool {
+            // Inside the lock: two first-time saves would otherwise both see
+            // the directory missing, and the one whose mkdir() lost would
+            // report a failure for a directory that now exists.
+            if ( ! is_dir(CONFIG_DIR) && ! @mkdir(CONFIG_DIR, 0755, true) && ! is_dir(CONFIG_DIR)) {
+                return false;
+            }
+
             $ok = self::writeFile(self::SETTINGS_FILE, $settings, 0644);
 
             return self::writeFile(self::CREDENTIALS_FILE, $secrets, 0600) && $ok;
@@ -151,9 +155,13 @@ final class Config
      * read-modify-write that would otherwise clobber an Apply landing between
      * its read and its rename.
      *
-     * The lock lives in /tmp rather than beside the configs - see LOCK_FILE -
-     * so taking it costs no flash write. It fails open: an unobtainable lock
-     * must not stop somebody saving their settings.
+     * The lock lives in /var/run - see LOCK_FILE - so taking it costs no flash
+     * write and no unprivileged process can hold it first.
+     *
+     * It fails open twice over: an unopenable lock file, or one already held
+     * for longer than the wait below, must not stop somebody saving their
+     * settings. Losing the serialisation is a worse-but-rare outcome; a webGUI
+     * that hangs on Apply is an immediate one.
      *
      * @template T
      * @param  callable(): T $work
@@ -166,7 +174,15 @@ final class Config
             return $work();
         }
 
-        @flock($handle, LOCK_EX);
+        // Non-blocking with a bounded retry, rather than waiting forever on
+        // whatever is holding it.
+        for ($attempt = 0; $attempt < 40; $attempt++) {
+            if (@flock($handle, LOCK_EX | LOCK_NB)) {
+                break;
+            }
+            usleep(50_000);
+        }
+
         try {
             return $work();
         } finally {

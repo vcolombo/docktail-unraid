@@ -21,4 +21,4 @@ php -r '
   }
   exit($r["ok"] ? 0 : 1);
 ' 2>/dev/null \
-  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail still reads it, but a value written with an unescaped \$ arrives with that \$ intact only after the next Apply"
+  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail reads it either way, but PHP's reader and the shell reader only agree on the escaped form until an Apply rewrites it"
