@@ -135,7 +135,7 @@ final class Config
      * but PHP's ini parser keeps the backslash, so any escaping that fixes one
      * side corrupts the other. There is no value to write that satisfies both,
      * so a backtick is refused at validation time instead - see
-     * containsShellMetacharacter() and its callers below.
+     * containsBacktick() and its callers below.
      *
      * @param array<string, string> $values
      */
@@ -188,7 +188,7 @@ final class Config
         $tailnet = trim((string) ($post['TAILSCALE_TAILNET'] ?? ''));
         // "-" is DockTail's own "whichever tailnet the credentials belong to",
         // which is the right thing to fall back to for a value we refuse.
-        if ($tailnet === '' || self::containsShellMetacharacter($tailnet)) {
+        if ($tailnet === '' || self::containsBacktick($tailnet)) {
             $tailnet = '-';
         }
         $out['TAILSCALE_TAILNET'] = $tailnet;
@@ -220,10 +220,10 @@ final class Config
         $out = [];
         foreach (self::SECRET_KEYS as $key) {
             $value = trim((string) ($post[$key] ?? ''));
-            // Dropped rather than stored: see containsShellMetacharacter().
-            // Keeping the previous value would be worse - the person would
-            // believe a credential was saved that was not.
-            $out[$key] = self::containsShellMetacharacter($value) ? '' : $value;
+            // Dropped rather than stored, and reported by apply.php through
+            // refusedFields(): keeping the previous value would be worse - the
+            // person would believe a credential was saved that was not.
+            $out[$key] = self::containsBacktick($value) ? '' : $value;
         }
 
         return $out;
@@ -239,16 +239,42 @@ final class Config
      * `$` is NOT rejected here - writeFile() escapes it in a form both parsers
      * agree on, so a credential containing one is stored and read back intact.
      */
-    private static function containsShellMetacharacter(string $value): bool
+    private static function containsBacktick(string $value): bool
     {
         return strpos($value, '`') !== false;
+    }
+
+    /**
+     * The free-text fields of a POST that coercion will refuse, so apply.php
+     * can say so. A refusal has to be spoken: an emptied credential behind a
+     * bare "Settings saved." leaves the same wrong belief as keeping the old
+     * value would.
+     *
+     * @param  array<string, mixed>  $post
+     * @return list<string>
+     */
+    public static function refusedFields(array $post): array
+    {
+        $fields = array_merge(
+            self::SECRET_KEYS,
+            ['TAILSCALE_TAILNET', 'DEFAULT_SERVICE_TAGS', 'IGNORE_SERVICE_NAMES']
+        );
+
+        $refused = [];
+        foreach ($fields as $key) {
+            if (self::containsBacktick(trim((string) ($post[$key] ?? '')))) {
+                $refused[] = $key;
+            }
+        }
+
+        return $refused;
     }
 
     private static function normalizeList(string $value): string
     {
         $parts = array_filter(
             array_map('trim', explode(',', $value)),
-            static fn (string $p): bool => $p !== '' && ! self::containsShellMetacharacter($p)
+            static fn (string $p): bool => $p !== '' && ! self::containsBacktick($p)
         );
 
         return implode(',', array_unique($parts));
@@ -333,6 +359,10 @@ final class Config
     Stored in <code>/boot/config/plugins/docktail/credentials.cfg</code> with mode
     <code>0600</code>, which the plugin excludes from Unraid Connect's flash backup so it is
     never uploaded to the cloud.
+    <br><br>
+    A backtick in a credential is refused rather than stored: the service reads this file as
+    a shell script, and a single backtick would blank every setting after it. Every other
+    character, <code>$</code> included, is stored exactly as typed.
 </blockquote>
 
 <dl>

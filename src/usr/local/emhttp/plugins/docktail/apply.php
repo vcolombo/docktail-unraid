@@ -39,6 +39,16 @@ switch ($action) {
             break;
         }
 
+        // First, because the page renders the whole reply as one line of text
+        // and a refusal is the part the person needs to read.
+        $refused = Config::refusedFields($_POST);
+        if ($refused !== []) {
+            printf(
+                "Refused, a backtick cannot be stored in a config value: %s.\n",
+                implode(', ', $refused)
+            );
+        }
+
         echo "Settings saved.\n";
         // Deferred restart, so this request returns immediately.
         @exec(escapeshellarg(RESTART_SH) . ' > /dev/null 2>&1');
