@@ -120,7 +120,25 @@ final class Config
         return $ok;
     }
 
-    /** @param array<string, string> $values */
+    /**
+     * A value written here is read back by two different parsers: PHP's
+     * parse_ini_file() (and Unraid's own parse_plugin_cfg()) on this side, and
+     * bash on the other, because rc.docktail sources all three config files
+     * with `.` to put them in DockTail's environment.
+     *
+     * Bash expands `$` and backticks inside a double-quoted assignment, so a
+     * stored value has to be escaped against that or it is not data any more.
+     * Both parsers agree on `\\` and `\"`, and both read `\$` back as a plain
+     * `$`, so those three are escaped here.
+     *
+     * A backtick is escaped by neither: bash reads `\`` as a literal backtick,
+     * but PHP's ini parser keeps the backslash, so any escaping that fixes one
+     * side corrupts the other. There is no value to write that satisfies both,
+     * so a backtick is refused at validation time instead - see
+     * containsShellMetacharacter() and its callers below.
+     *
+     * @param array<string, string> $values
+     */
     private static function writeFile(string $file, array $values, int $mode): bool
     {
         $body = '';
@@ -129,7 +147,7 @@ final class Config
             if ($key === '' || $key === null) {
                 continue;
             }
-            $escaped = str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $value);
+            $escaped = str_replace(['\\', '"', '$'], ['\\\\', '\\"', '\\$'], (string) $value);
             $body .= sprintf("%s=\"%s\"\n", $key, $escaped);
         }
 
@@ -167,8 +185,13 @@ final class Config
             $out[$key] = $raw === '1' ? '1' : '0';
         }
 
-        $tailnet                  = trim((string) ($post['TAILSCALE_TAILNET'] ?? ''));
-        $out['TAILSCALE_TAILNET'] = $tailnet === '' ? '-' : $tailnet;
+        $tailnet = trim((string) ($post['TAILSCALE_TAILNET'] ?? ''));
+        // "-" is DockTail's own "whichever tailnet the credentials belong to",
+        // which is the right thing to fall back to for a value we refuse.
+        if ($tailnet === '' || self::containsShellMetacharacter($tailnet)) {
+            $tailnet = '-';
+        }
+        $out['TAILSCALE_TAILNET'] = $tailnet;
 
         $out['DEFAULT_SERVICE_TAGS'] = self::normalizeList((string) ($post['DEFAULT_SERVICE_TAGS'] ?? ''));
         if ($out['DEFAULT_SERVICE_TAGS'] === '') {
@@ -196,15 +219,37 @@ final class Config
     {
         $out = [];
         foreach (self::SECRET_KEYS as $key) {
-            $out[$key] = trim((string) ($post[$key] ?? ''));
+            $value = trim((string) ($post[$key] ?? ''));
+            // Dropped rather than stored: see containsShellMetacharacter().
+            // Keeping the previous value would be worse - the person would
+            // believe a credential was saved that was not.
+            $out[$key] = self::containsShellMetacharacter($value) ? '' : $value;
         }
 
         return $out;
     }
 
+    /**
+     * A backtick cannot be written to these files safely, because rc.docktail
+     * sources them with bash while PHP reads them back with parse_ini_file(),
+     * and the two disagree about what `\`` means. Left unescaped it is worse
+     * than an injection: bash aborts the whole file on the unmatched backtick,
+     * so every setting after it silently reads as empty.
+     *
+     * `$` is NOT rejected here - writeFile() escapes it in a form both parsers
+     * agree on, so a credential containing one is stored and read back intact.
+     */
+    private static function containsShellMetacharacter(string $value): bool
+    {
+        return strpos($value, '`') !== false;
+    }
+
     private static function normalizeList(string $value): string
     {
-        $parts = array_filter(array_map('trim', explode(',', $value)), static fn (string $p): bool => $p !== '');
+        $parts = array_filter(
+            array_map('trim', explode(',', $value)),
+            static fn (string $p): bool => $p !== '' && ! self::containsShellMetacharacter($p)
+        );
 
         return implode(',', array_unique($parts));
     }
