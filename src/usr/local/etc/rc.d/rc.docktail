@@ -25,12 +25,30 @@ log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
 }
 
+# A config file is safe to source only if nothing in it can be expanded. The
+# webGUI escapes $ as \$ and refuses backticks outright, but this is the
+# consumer and it does not get to assume that: a file written by an older
+# plugin version, hand-edited on the flash, or left unconverted by a failed
+# migration would otherwise run command substitution as root at every boot.
+#
+# Escaped sequences are removed first, so a legitimate \$ in a credential
+# passes; anything expandable left after that is refused.
+config_is_safe() {
+  ! sed -e 's/\\\\//g' -e 's/\\\$//g' "$1" | grep -q '[`$]'
+}
+
 load_config() {
-  # Defaults first, user settings on top, then secrets. All three files are
-  # plain KEY="value", safe to source.
-  [ -f "${PLUGIN_ROOT}/default.cfg" ] && . "${PLUGIN_ROOT}/default.cfg"
-  [ -f "${CONFIG_DIR}/docktail.cfg" ] && . "${CONFIG_DIR}/docktail.cfg"
-  [ -f "${CONFIG_DIR}/credentials.cfg" ] && . "${CONFIG_DIR}/credentials.cfg"
+  # Defaults first, user settings on top, then secrets. Each is plain
+  # KEY="value"; a file that is anything else is skipped rather than trusted.
+  local file
+  for file in "${PLUGIN_ROOT}/default.cfg" "${CONFIG_DIR}/docktail.cfg" "${CONFIG_DIR}/credentials.cfg"; do
+    [ -f "$file" ] || continue
+    if config_is_safe "$file"; then
+      . "$file"
+    else
+      log "Refusing to source $file: it contains an unescaped \$ or a backtick, which bash would expand. Open the DockTail settings and press Apply to rewrite it."
+    fi
+  done
   return 0
 }
 

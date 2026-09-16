@@ -151,9 +151,9 @@ final class Config
      * read-modify-write that would otherwise clobber an Apply landing between
      * its read and its rename.
      *
-     * The lock lives in /var/lock rather than beside the configs, so taking it
-     * costs no flash write. It fails open: an unobtainable lock must not stop
-     * somebody saving their settings.
+     * The lock lives in /tmp rather than beside the configs - see LOCK_FILE -
+     * so taking it costs no flash write. It fails open: an unobtainable lock
+     * must not stop somebody saving their settings.
      *
      * @template T
      * @param  callable(): T $work
@@ -218,6 +218,7 @@ final class Config
                     continue;
                 }
 
+                $lost = [];
                 foreach ($values as $key => $value) {
                     if ( ! self::containsBacktick($value)) {
                         continue;
@@ -228,7 +229,7 @@ final class Config
                     // would silently stop ignoring services the person asked
                     // DockTail to leave alone.
                     $cleaned = in_array($key, self::LIST_SETTINGS, true) ? self::normalizeList($value) : '';
-                    $dropped[] = self::REFUSABLE_FIELDS[$key] ?? $key;
+                    $lost[]  = self::REFUSABLE_FIELDS[$key] ?? $key;
 
                     if ($cleaned === '') {
                         unset($values[$key]);
@@ -242,7 +243,15 @@ final class Config
                     continue;
                 }
 
-                $ok = self::writeFile($file, $values, $mode) && $ok;
+                if ( ! self::writeFile($file, $values, $mode)) {
+                    // Nothing was dropped: the legacy value is still on disk,
+                    // and saying otherwise would tell somebody a credential is
+                    // gone when it is still there being expanded.
+                    $ok = false;
+                    continue;
+                }
+
+                $dropped = array_merge($dropped, $lost);
             }
 
             return ['ok' => $ok, 'dropped' => $dropped];
