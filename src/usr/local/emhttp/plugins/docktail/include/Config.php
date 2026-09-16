@@ -510,24 +510,30 @@ final class Config
 function docktailApply() {
     var form = $('#docktail_settings');
     var out = $('#docktail_apply_result');
+    var apply = form.find('input[value="Apply"]');
 
     out.removeClass('docktail-apply-error').text('Saving...');
+    // Disarmed for the flight, so a second submission cannot overlap the
+    // first: two answers arriving out of order would leave the button in a
+    // state that belongs to values the form no longer holds.
+    apply.prop('disabled', true);
 
     $.post(form.attr('action'), form.serialize())
         .done(function(data, status, xhr) {
             // A refused value is a partial save: flag it like a failure and
-            // leave Apply armed, because the person has a value to correct and
-            // would otherwise have to reload the tab to resubmit it.
+            // rearm Apply, because the person has a value to correct and would
+            // otherwise have to reload the tab to resubmit it.
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
             out.toggleClass('docktail-apply-error', !!refused)
                .text(String(data).trim() || 'Settings saved.');
-            form.find('input[value="Apply"]').prop('disabled', !refused);
+            apply.prop('disabled', ! refused);
         })
         .fail(function(xhr) {
             var detail = xhr.status === 403
                 ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
                 : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
             out.addClass('docktail-apply-error').text('Could not save: ' + detail);
+            apply.prop('disabled', false);
         });
 }
 </script>
