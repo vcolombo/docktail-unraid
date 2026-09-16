@@ -130,6 +130,40 @@ final class Config
     }
 
     /**
+     * Re-write both files through writeFile(), so a value stored by a plugin
+     * version that escaped only \ and " stops being expanded when rc.docktail
+     * sources it. Run once per install from doinst.sh: escaping new writes
+     * does nothing for the credential already sitting on the flash, and
+     * nothing rewrites it until the person next presses Apply.
+     *
+     * PHP's ini parser never expanded these values, so what it reads back is
+     * the author's literal text - re-writing it escaped is the whole fix. A
+     * backtick is dropped instead, matching coerceSecrets(): the key is
+     * removed rather than emptied, so a setting falls back to default.cfg
+     * instead of overriding it with nothing.
+     *
+     * A file that is missing or unparseable is left alone; there is nothing to
+     * normalise and overwriting it would lose settings.
+     */
+    public static function normalizeStoredFiles(): void
+    {
+        foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
+            $values = self::readFile($file);
+            if ($values === []) {
+                continue;
+            }
+
+            foreach ($values as $key => $value) {
+                if (self::containsBacktick($value)) {
+                    unset($values[$key]);
+                }
+            }
+
+            self::writeFile($file, $values, $mode);
+        }
+    }
+
+    /**
      * A value written here is read back by two different parsers: PHP's
      * parse_ini_file() (and Unraid's own parse_plugin_cfg()) on this side, and
      * bash on the other, because rc.docktail sources all three config files
@@ -518,7 +552,15 @@ function docktailApply() {
     // state that belongs to values the form no longer holds.
     apply.prop('disabled', true);
 
-    $.post(form.attr('action'), form.serialize())
+    // Bounded like the Status tab's POSTs: the save returns immediately (the
+    // restart is deferred), and Apply is disarmed until an answer arrives, so
+    // a request left pending must time out or the form stays dead.
+    $.ajax({
+        url: form.attr('action'),
+        type: 'POST',
+        timeout: 25000,
+        data: form.serialize()
+    })
         .done(function(data, status, xhr) {
             // A refused value is a partial save: flag it like a failure and
             // rearm Apply, because the person has a value to correct and would
@@ -528,10 +570,12 @@ function docktailApply() {
                .text(String(data).trim() || 'Settings saved.');
             apply.prop('disabled', ! refused);
         })
-        .fail(function(xhr) {
-            var detail = xhr.status === 403
-                ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
-                : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+        .fail(function(xhr, status) {
+            var detail = status === 'timeout'
+                ? 'the request timed out. Check /var/log/docktail.log, then retry.'
+                : xhr.status === 403
+                    ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
+                    : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
             out.addClass('docktail-apply-error').text('Could not save: ' + detail);
             apply.prop('disabled', false);
         });
