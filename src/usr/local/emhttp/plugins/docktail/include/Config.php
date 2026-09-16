@@ -53,6 +53,25 @@ final class Config
         'DOCKTAIL_CLOUD_KEY',
     ];
 
+    /**
+     * Every field whose value reaches a config file as free text, so every
+     * field where a backtick can be refused - see containsBacktick(). The
+     * labels are what the settings page calls them below, because a refusal is
+     * reported to the person looking at that form, not at the cfg file. A new
+     * free-text setting belongs here as well as in SETTING_KEYS.
+     *
+     * @var array<string, string>
+     */
+    public const REFUSABLE_FIELDS = [
+        'TAILSCALE_OAUTH_CLIENT_ID'     => 'OAuth Client ID',
+        'TAILSCALE_OAUTH_CLIENT_SECRET' => 'OAuth Client Secret',
+        'TAILSCALE_API_KEY'             => 'API Key',
+        'DOCKTAIL_CLOUD_KEY'            => 'DockTail Cloud key',
+        'TAILSCALE_TAILNET'             => 'Tailnet',
+        'DEFAULT_SERVICE_TAGS'          => 'Default service tags',
+        'IGNORE_SERVICE_NAMES'          => 'Ignored service names',
+    ];
+
     public const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 
     /**
@@ -245,25 +264,25 @@ final class Config
     }
 
     /**
-     * The free-text fields of a POST that coercion will refuse, so apply.php
-     * can say so. A refusal has to be spoken: an emptied credential behind a
-     * bare "Settings saved." leaves the same wrong belief as keeping the old
-     * value would.
+     * The fields of a POST carrying a backtick, labelled as the settings page
+     * labels them, so apply.php can say which value it dropped. A refusal has
+     * to be spoken: an emptied credential behind a bare "Settings saved."
+     * leaves the same wrong belief as keeping the old value would.
+     *
+     * Only the backtick rule is reported. The other coercions replace a bad
+     * value with a stated default the page shows on its next render -
+     * RECONCILE_INTERVAL falling back to 60s, say - so they speak for
+     * themselves; an emptied password field does not.
      *
      * @param  array<string, mixed>  $post
      * @return list<string>
      */
     public static function refusedFields(array $post): array
     {
-        $fields = array_merge(
-            self::SECRET_KEYS,
-            ['TAILSCALE_TAILNET', 'DEFAULT_SERVICE_TAGS', 'IGNORE_SERVICE_NAMES']
-        );
-
         $refused = [];
-        foreach ($fields as $key) {
+        foreach (self::REFUSABLE_FIELDS as $key => $label) {
             if (self::containsBacktick(trim((string) ($post[$key] ?? '')))) {
-                $refused[] = $key;
+                $refused[] = $label;
             }
         }
 
@@ -362,7 +381,7 @@ final class Config
     <br><br>
     A backtick in a credential is refused rather than stored: the service reads this file as
     a shell script, and a single backtick would blank every setting after it. Every other
-    character, <code>$</code> included, is stored exactly as typed.
+    character, <code>$</code> included, is stored as typed; spaces at either end are trimmed.
 </blockquote>
 
 <dl>
@@ -505,9 +524,14 @@ function docktailApply() {
     out.removeClass('docktail-apply-error').text('Saving...');
 
     $.post(form.attr('action'), form.serialize())
-        .done(function(data) {
-            out.text(String(data).trim() || 'Settings saved.');
-            form.find('input[value="Apply"]').prop('disabled', true);
+        .done(function(data, status, xhr) {
+            // A refused value is a partial save: flag it like a failure and
+            // leave Apply armed, because the person has a value to correct and
+            // would otherwise have to reload the tab to resubmit it.
+            var refused = xhr.getResponseHeader('X-DockTail-Refused');
+            out.toggleClass('docktail-apply-error', !!refused)
+               .text(String(data).trim() || 'Settings saved.');
+            form.find('input[value="Apply"]').prop('disabled', !refused);
         })
         .fail(function(xhr) {
             var detail = xhr.status === 403

@@ -40,11 +40,15 @@ switch ($action) {
         }
 
         // First, because the page renders the whole reply as one line of text
-        // and a refusal is the part the person needs to read.
+        // and a refusal is the part the person needs to read. "Dropped from"
+        // covers all three shapes: a secret is emptied, the tailnet falls back
+        // to "-", and a list keeps every entry but the offending one.
         $refused = Config::refusedFields($_POST);
         if ($refused !== []) {
+            // Read by the page to keep Apply armed - see docktailApply().
+            header('X-DockTail-Refused: ' . count($refused));
             printf(
-                "Refused, a backtick cannot be stored in a config value: %s.\n",
+                "A backtick cannot be stored in a config value, so it was dropped from: %s.\n",
                 implode(', ', $refused)
             );
         }
