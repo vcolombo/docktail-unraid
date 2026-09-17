@@ -271,8 +271,13 @@ final class Config
     }
 
     /**
-     * Persist both files. Written to a temporary file and renamed, so a
-     * concurrent rc.docktail read never sees a half-written config.
+     * Persist both files, as one change.
+     *
+     * Each file is staged and renamed, so a concurrent rc.docktail read never
+     * sees a half-written config - and both are staged before either is
+     * renamed, so a flash that fills up between them leaves the previous pair
+     * in place rather than this submission's settings beside the last one's
+     * credentials.
      *
      * @param array<string, string> $settings
      * @param array<string, string> $secrets
@@ -287,9 +292,22 @@ final class Config
                 return false;
             }
 
-            $ok = self::writeFile(self::SETTINGS_FILE, $settings, 0644);
+            $staged = [];
+            foreach ([
+                self::SETTINGS_FILE    => [$settings, 0644],
+                self::CREDENTIALS_FILE => [$secrets, 0600],
+            ] as $file => [$values, $mode]) {
+                $tmp = self::stageFile($file, $values, $mode);
+                if ($tmp === false) {
+                    self::discardStaged($staged);
 
-            return self::writeFile(self::CREDENTIALS_FILE, $secrets, 0600) && $ok;
+                    return false;
+                }
+
+                $staged[$file] = [$tmp, $mode];
+            }
+
+            return self::commitStaged($staged);
         });
     }
 
@@ -439,11 +457,15 @@ final class Config
     public static function normalizeStoredFiles(): array
     {
         return self::withLock(static function (): array {
-            $ok          = true;
+            // No running total: a file that cannot be converted abandons the
+            // whole migration below, so reaching the end means it worked.
             $dropped     = [];
             $ignored     = [];
             $malformed   = [];
             $unparseable = [];
+            $staged      = [];
+            // What each staged file would report, held back until it lands.
+            $pending = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
                 if ( ! is_file($file)) {
@@ -503,21 +525,49 @@ final class Config
                     continue;
                 }
 
-                if ( ! self::writeFile($file, $values, $mode)) {
-                    // Nothing changed on disk, so nothing is reported: saying
-                    // a credential was dropped while it is still sitting
-                    // there would be worse than saying nothing.
-                    $ok = false;
-                    continue;
+                $tmp = self::stageFile($file, $values, $mode);
+                if ($tmp === false) {
+                    // Nothing lands. Converting the settings while the
+                    // credentials keep their legacy spelling leaves the pair
+                    // mixed, and doinst.sh schedules its restart either way -
+                    // so the whole migration is abandoned and reported, with
+                    // both files exactly as the old version left them.
+                    self::discardStaged($staged);
+
+                    return [
+                        'ok'          => false,
+                        'dropped'     => [],
+                        'ignored'     => [],
+                        'malformed'   => [],
+                        'unparseable' => $unparseable,
+                    ];
                 }
 
+                $staged[$file] = [$tmp, $mode];
+                $pending[]     = [$lost, $unknown, $broken];
+            }
+
+            // Both conversions land together or neither does: a rename that
+            // fails after the first one succeeded is the same mixed pair, and
+            // the reports are held back until the files are actually on disk.
+            if ($staged !== [] && ! self::commitStaged($staged)) {
+                return [
+                    'ok'          => false,
+                    'dropped'     => [],
+                    'ignored'     => [],
+                    'malformed'   => [],
+                    'unparseable' => $unparseable,
+                ];
+            }
+
+            foreach ($pending as [$lost, $unknown, $broken]) {
                 $dropped   = array_merge($dropped, $lost);
                 $ignored   = array_merge($ignored, $unknown);
                 $malformed = array_merge($malformed, $broken);
             }
 
             return [
-                'ok'          => $ok,
+                'ok'          => true,
                 'dropped'     => $dropped,
                 'ignored'     => $ignored,
                 'malformed'   => $malformed,
@@ -564,23 +614,68 @@ final class Config
         return $body;
     }
 
-    /** @param array<string, string> $values */
-    private static function writeFile(string $file, array $values, int $mode): bool
+    /**
+     * Write a body next to where it belongs, without putting it there.
+     *
+     * The pair has to move together - new settings beside the previous
+     * credentials is a config nobody submitted - so a caller with two files to
+     * write stages both and only then commits. A rename within a directory is
+     * atomic and needs no space, so once both temps exist the commit is as
+     * close to all-or-nothing as a filesystem allows; the window that remains
+     * is a rename failing on I/O, not on the config being too big for the
+     * flash or the write being cut short.
+     *
+     * @param  array<string, string> $values
+     * @return string|false the staged path, or false if nothing was staged
+     */
+    private static function stageFile(string $file, array $values, int $mode): string|false
     {
         $body = self::renderBody($values);
-        $tmp = $file . '.tmp';
+        $tmp  = $file . '.tmp';
         if (@file_put_contents($tmp, $body) !== strlen($body)) {
+            // A short write leaves a truncated temp, and the flash filling up
+            // is exactly when that happens. Renaming it would publish it.
             @unlink($tmp);
-            return false;
-        }
-        @chmod($tmp, $mode);
-        if ( ! @rename($tmp, $file)) {
-            @unlink($tmp);
-            return false;
-        }
-        @chmod($file, $mode);
 
-        return true;
+            return false;
+        }
+
+        // Before the rename, so the file is never briefly world-readable at
+        // its final name.
+        @chmod($tmp, $mode);
+
+        return $tmp;
+    }
+
+    /**
+     * Move staged files into place.
+     *
+     * @param array<string, array{string, int}> $staged destination => [staged path, mode]
+     */
+    private static function commitStaged(array $staged): bool
+    {
+        $ok = true;
+        foreach ($staged as $file => [$tmp, $mode]) {
+            if ( ! @rename($tmp, $file)) {
+                @unlink($tmp);
+                $ok = false;
+                continue;
+            }
+
+            // Again after the rename: an existing file keeps its own mode
+            // through a rename onto it.
+            @chmod($file, $mode);
+        }
+
+        return $ok;
+    }
+
+    /** @param array<string, array{string, int}> $staged */
+    private static function discardStaged(array $staged): void
+    {
+        foreach ($staged as [$tmp, $mode]) {
+            @unlink($tmp);
+        }
     }
 
     /**
