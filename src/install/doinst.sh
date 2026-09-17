@@ -31,6 +31,9 @@ php -d display_errors=stderr -r '
   foreach ($r["moved"] as $field) {
       echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }
+  foreach ($r["protected"] as $file) {
+      echo "docktail: tightened $file to 0600 - it holds a credential and PHP cannot parse it, so the credential cannot be moved out of it. Repair the file and press Apply.\n";
+  }
   foreach ($r["ignored"] as $key) {
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";
   }

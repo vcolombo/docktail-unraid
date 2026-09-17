@@ -457,8 +457,8 @@ final class Config
      * each time, forever.
      *
      * @return array{ok: bool, dropped: list<string>, moved: list<string>,
-     *         ignored: list<string>, malformed: list<string>,
-     *         unparseable: list<string>} ok is false only when a file that
+     *         protected: list<string>, ignored: list<string>,
+     *         malformed: list<string>, unparseable: list<string>} ok is false only when a file that
      *         needed converting could not be written; dropped names fields
      *         whose value did not survive; moved names secrets relocated out
      *         of the settings file; ignored names keys nothing reads;
@@ -478,6 +478,7 @@ final class Config
             $ignored     = [];
             $malformed   = [];
             $unparseable = [];
+            $protected   = [];
             $staged      = [];
             // What each staged file would report, held back until it lands.
             $pending = [];
@@ -492,8 +493,18 @@ final class Config
                 // credential gets lost. An empty or comments-only file parses
                 // fine and is simply left alone.
                 if (is_file($file) && self::parseFile($file) === null) {
-                    $unparseable[]  = $file;
-                    $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
+                    $unparseable[] = $file;
+                    $state[$file]  = ['values' => [], 'malformed' => [], 'usable' => false];
+
+                    // The secret cannot be moved out of a file that cannot be
+                    // rewritten - rewriting it is what would lose the lines
+                    // PHP choked on. The exposure is the file's mode, not its
+                    // contents, so the mode is what changes: both readers of
+                    // this file run as root.
+                    if (self::holdsSecret($file) && @chmod($file, 0600)) {
+                        $protected[] = $file;
+                    }
+
                     continue;
                 }
 
@@ -559,7 +570,7 @@ final class Config
                     // both files exactly as the old version left them.
                     self::discardStaged($staged);
 
-                    return self::migrationFailed($unparseable);
+                    return self::migrationFailed($unparseable, $protected);
                 }
 
                 $staged[$file] = [$tmp, $mode];
@@ -572,7 +583,7 @@ final class Config
             // A moved secret is two writes - out of one file, into the other -
             // so a half-landed pair would duplicate it at 0644.
             if ($staged !== [] && ! self::commitStaged($staged)) {
-                return self::migrationFailed($unparseable);
+                return self::migrationFailed($unparseable, $protected);
             }
 
             foreach ($pending as [$lost, $unknown, $broken]) {
@@ -585,6 +596,7 @@ final class Config
                 'ok'          => true,
                 'dropped'     => $dropped,
                 'moved'       => $moved,
+                'protected'   => $protected,
                 'ignored'     => $ignored,
                 'malformed'   => $malformed,
                 'unparseable' => $unparseable,
@@ -623,10 +635,28 @@ final class Config
             unset($state[self::SETTINGS_FILE]['values'][$key]);
             $label = self::REFUSABLE_FIELDS[$key] ?? $key;
 
-            $occupied = ($state[self::CREDENTIALS_FILE]['values'][$key] ?? '') !== '';
-            if ($value === '' || $occupied || ! $state[self::CREDENTIALS_FILE]['usable']) {
+            // What is already in the credentials file only wins if it is going
+            // to survive this migration. A value carrying a backtick is about
+            // to be dropped by the pass below, and preferring it over a usable
+            // legacy value would leave the person with no credential at all.
+            $existing = $state[self::CREDENTIALS_FILE]['values'][$key] ?? '';
+            $occupied = $existing !== '' && ! self::containsUnstorable($existing);
+
+            // Reported as dropped rather than moved when it cannot be stored:
+            // the pass below would drop it on arrival, and saying both about
+            // the same field describes a move that never happened.
+            $storable = $value !== '' && ! self::containsUnstorable($value);
+
+            if ( ! $storable || $occupied || ! $state[self::CREDENTIALS_FILE]['usable']) {
                 $dropped[] = $label;
                 continue;
+            }
+
+            // Said out loud too: the value being overwritten here is one
+            // somebody set through the settings page, and it is only being
+            // overwritten because this migration cannot store it.
+            if ($existing !== '') {
+                $dropped[] = $label;
             }
 
             $state[self::CREDENTIALS_FILE]['values'][$key] = $value;
@@ -637,19 +667,41 @@ final class Config
     }
 
     /**
-     * @param  list<string> $unparseable
-     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
-     *         ignored: list<string>, malformed: list<string>, unparseable: list<string>}
+     * Does this file hold a credential, as the service's own reader sees it?
+     *
+     * Asked of files PHP cannot parse, so it goes through the reader rather
+     * than parse_ini_file(): a file with one malformed line still hands the
+     * daemon every valid line around it, including a secret.
      */
-    private static function migrationFailed(array $unparseable): array
+    private static function holdsSecret(string $file): bool
+    {
+        $values = self::parseAsReader($file)['values'];
+        foreach (self::SECRET_KEYS as $key) {
+            if (($values[$key] ?? '') !== '') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  list<string> $unparseable
+     * @param  list<string> $protected
+     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
+     *         protected: list<string>, ignored: list<string>,
+     *         malformed: list<string>, unparseable: list<string>}
+     */
+    private static function migrationFailed(array $unparseable, array $protected): array
     {
         // Nothing changed on disk, so nothing is reported: saying a credential
         // was dropped while it is still sitting there would be worse than
-        // saying nothing.
+        // saying nothing. The mode change is reported, because it did happen.
         return [
             'ok'          => false,
             'dropped'     => [],
             'moved'       => [],
+            'protected'   => $protected,
             'ignored'     => [],
             'malformed'   => [],
             'unparseable' => $unparseable,
@@ -1231,29 +1283,64 @@ window.docktailApplyState = window.docktailApplyState || {
     // A save whose answer never arrived. The form cannot be trusted to
     // describe what is stored, and a retry could land behind it.
     unknown: false,
+    // The form matches what was last written, so there is nothing to save.
+    // Kept on window because the server renders the button enabled every time
+    // the fragment is injected, and an unchanged form that can be submitted is
+    // a restart, and a write over whatever another tab saved since.
+    clean: false,
     bound: false
 };
 
-// An edit means the form no longer matches what was last written, so Apply has
-// to be usable whatever the previous answer was - otherwise a change made just
-// after a clean save, or while one was in flight, cannot be submitted without
-// reloading the tab.
+// Every render, not just the first: the fragment arrives with a fresh enabled
+// Apply and an empty result line, so whatever this page already knows has to
+// be put back onto it.
 $(function() {
     var state = window.docktailApplyState;
+    var nodes = docktailApplyNodes();
+
+    if (state.unknown) {
+        docktailApplyUnknown(nodes, 'A previous save did not report back and may still be in '
+            + 'progress. Reload to see what is stored before saving again: ');
+    } else if (state.request || (state.clean && ! state.dirty)) {
+        nodes.apply.prop('disabled', true);
+    }
+
     if (state.bound) {
-        // Re-rendered fragment: the handler from the first render is still on
-        // the live element and would fire twice.
+        // Re-rendered fragment: the handler from the first render is delegated
+        // from document and still live, and would fire twice.
         return;
     }
 
+    // An edit means the form no longer matches what was last written, so Apply
+    // has to be usable whatever the previous answer was - otherwise a change
+    // made just after a clean save, or while one was in flight, cannot be
+    // submitted without reloading the tab.
     state.bound = true;
     $(document).on('input change', '#docktail_settings input, #docktail_settings select', function() {
         state.dirty = true;
+        state.clean = false;
         if ( ! state.request && ! state.unknown) {
             $('#docktail_settings').find('input[value="Apply"]').prop('disabled', false);
         }
     });
 });
+
+/*
+ * A save nobody can describe the outcome of. The message carries the way out
+ * with it, because the flag lives on window so that re-rendering the fragment
+ * cannot clear it - only a page load can, and this is the button that does it.
+ */
+function docktailApplyUnknown(nodes, message) {
+    nodes.out.addClass('docktail-apply-error')
+        .empty()
+        .append(document.createTextNode(message))
+        .append($('<button type="button">')
+            .text('Reload')
+            .on('click', function() {
+                window.location.reload();
+            }));
+    nodes.apply.prop('disabled', true);
+}
 
 /*
  * Looked up on every use rather than held: an AJAX-injected fragment can be
@@ -1289,24 +1376,18 @@ function docktailApply() {
     // inside Config::write(), and a retry accepted now could land first and
     // then be overwritten by the older form it was meant to replace. Renames
     // are atomic but they are not ordered, and nothing here can order them.
-    //
-    // The way out is a page load, not a tab switch: this flag lives on window
-    // precisely so re-rendering the fragment cannot clear it, so the button
-    // that clears it is offered here rather than described.
     if (state.unknown) {
-        out.addClass('docktail-apply-error')
-           .empty()
-           .append(document.createTextNode(
-               'A previous save did not report back and may still be in progress. '
-               + 'Reload to see what is stored before saving again: '
-           ))
-           .append($('<button type="button">')
-               .text('Reload')
-               .on('click', function() {
-                   window.location.reload();
-               }));
-        apply.prop('disabled', true);
+        docktailApplyUnknown(nodes, 'A previous save did not report back and may still be in '
+            + 'progress. Reload to see what is stored before saving again: ');
 
+        return;
+    }
+
+    // Nothing to save. The button is disarmed for this, but the button is not
+    // the guard: a form submit reaches here too, and a redundant save means a
+    // redundant restart - and a write over whatever another tab has saved
+    // since this form was rendered.
+    if (state.clean && ! state.dirty) {
         return;
     }
 
@@ -1336,7 +1417,8 @@ function docktailApply() {
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
             live.out.toggleClass('docktail-apply-error', !!refused)
                 .text(String(data).trim() || 'Settings saved.');
-            live.apply.prop('disabled', ! refused && ! state.dirty);
+            state.clean = ! refused && ! state.dirty;
+            live.apply.prop('disabled', state.clean);
         })
         .fail(function(xhr, status) {
             var live = docktailApplyNodes();
@@ -1344,22 +1426,26 @@ function docktailApply() {
             // Two outcomes say nothing about what the server did: a timeout,
             // and a transport failure (status 0 - the connection dropped, or
             // the tab navigated) which can land after PHP has already written
-            // the pair. Both leave Apply disarmed, because a retry could be
-            // overtaken by the save it was meant to replace. A 403 and an HTTP
-            // status mean the write did not happen and are safe to retry.
-            var unknown = status === 'timeout' || xhr.status === 0;
-            var detail = status === 'timeout'
-                ? 'the request timed out. It may still have been applied - reload the tab to '
-                  + 'see what is stored before retrying.'
-                : xhr.status === 0
-                    ? 'the connection dropped before an answer arrived. It may still have been '
-                      + 'applied - reload the tab to see what is stored.'
-                    : xhr.status === 403
-                        ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
-                        : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+            // the pair. Both leave Apply disarmed with the Reload button that
+            // clears the state, because a retry could be overtaken by the save
+            // it was meant to replace. A 403 and an HTTP status mean the write
+            // did not happen and are safe to retry.
+            if (status === 'timeout' || xhr.status === 0) {
+                state.unknown = true;
+                docktailApplyUnknown(live, status === 'timeout'
+                    ? 'Could not save: the request timed out, and it may still have been applied. '
+                      + 'Reload to see what is stored: '
+                    : 'Could not save: the connection dropped before an answer arrived, and it may '
+                      + 'still have been applied. Reload to see what is stored: ');
+
+                return;
+            }
+
+            var detail = xhr.status === 403
+                ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
+                : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
             live.out.addClass('docktail-apply-error').text('Could not save: ' + detail);
-            state.unknown = unknown;
-            live.apply.prop('disabled', unknown);
+            live.apply.prop('disabled', false);
         })
         .always(function() {
             state.request = null;

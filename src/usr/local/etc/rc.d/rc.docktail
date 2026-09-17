@@ -27,6 +27,12 @@ export PATH="$TRUSTED_PATH"
 # Services advertised on the tailnet.
 STOP_TIMEOUT=35
 
+# Seconds a start waits for the new daemon to become visible to is_running()
+# before giving up on it, while holding the lifecycle lock. Covers a fork and
+# an exec, not a slow first reconcile: DockTail is matched by its command line,
+# which is set the moment it execs.
+START_VISIBLE_TIMEOUT=5
+
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
 }
@@ -254,7 +260,28 @@ start_docktail() {
   # times out - would leave the lock held for as long as DockTail runs. The
   # daemon has no business holding either.
   nohup "$BIN" >> "$LOG" 2>&1 8>&- 9>&- &
-  echo $! > "$PIDFILE"
+  started=$!
+  echo "$started" > "$PIDFILE"
+
+  # Held until the daemon is visible to is_running(), because the lock is only
+  # worth holding for that long: a stop taking the lock in the gap between the
+  # fork and the exec would look around, see nothing running, finish - and the
+  # daemon would come up behind it. Bounded, because a start that never
+  # becomes visible must not hold the lock for the next action either; the
+  # pidfile is already written and stop_docktail() falls back to it.
+  waited=0
+  while [ "$waited" -lt "$((START_VISIBLE_TIMEOUT * 10))" ]; do
+    is_running && break
+    kill -0 "$started" 2> /dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  if ! is_running; then
+    log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
+    return 1
+  fi
+
   return 0
 }
 
