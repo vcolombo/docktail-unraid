@@ -39,6 +39,11 @@ final class Config
     // plugin already keeps its pidfile there.
     public const LOCK_FILE = '/var/run/docktail-config.lock';
 
+    // Seconds to wait for the lock before giving up and going ahead anyway.
+    // Kept equal to CONFIG_LOCK_WAIT in rc.docktail: the two sides wait on each
+    // other, so one number is one behaviour to reason about.
+    public const LOCK_WAIT = 5;
+
     /** @var list<string> */
     public const SECRET_KEYS = [
         'TAILSCALE_OAUTH_CLIENT_ID',
@@ -105,30 +110,38 @@ final class Config
     /**
      * Shipped defaults merged under the user's settings, plus the credentials.
      *
+     * Under the shared lock, because this reads two files that are written as a
+     * pair: Status and ConnectionCheck would otherwise be able to pick up an
+     * OAuth client ID beside the secret it replaced and report a control-plane
+     * failure that is an artefact of the read, not of the credentials.
+     *
      * @return array<string, string>
      */
     public static function read(): array
     {
-        $values = self::defaults();
+        return self::withLock(static function (): array {
+            $values = self::defaults();
 
-        // parse_plugin_cfg() is only defined when Unraid's webGUI helpers are
-        // loaded (i.e. on a .page render), so the endpoints get a plain merge.
-        if (function_exists('parse_plugin_cfg')) {
-            $merged = \parse_plugin_cfg(PLUGIN_NAME);
-            if (is_array($merged)) {
-                $values = array_merge($values, array_map('strval', $merged));
+            // parse_plugin_cfg() is only defined when Unraid's webGUI helpers
+            // are loaded (i.e. on a .page render), so the endpoints get a
+            // plain merge.
+            if (function_exists('parse_plugin_cfg')) {
+                $merged = \parse_plugin_cfg(PLUGIN_NAME);
+                if (is_array($merged)) {
+                    $values = array_merge($values, array_map('strval', $merged));
+                }
+            } else {
+                $values = array_merge($values, self::readFile(self::SETTINGS_FILE));
             }
-        } else {
-            $values = array_merge($values, self::readFile(self::SETTINGS_FILE));
-        }
 
-        $values = array_merge($values, self::readFile(self::CREDENTIALS_FILE));
+            $values = array_merge($values, self::readFile(self::CREDENTIALS_FILE));
 
-        foreach (self::SECRET_KEYS as $key) {
-            $values[$key] ??= '';
-        }
+            foreach (self::SECRET_KEYS as $key) {
+                $values[$key] ??= '';
+            }
 
-        return $values;
+            return $values;
+        }, LOCK_SH);
     }
 
     /** @return array<string, string> */
@@ -297,25 +310,35 @@ final class Config
      * doinst.sh runs the migration below while the service is starting.
      *
      * It fails open twice over: an unopenable lock file, or one already held
-     * for longer than the wait below, must not stop somebody saving their
-     * settings. Losing the serialisation is a worse-but-rare outcome; a webGUI
-     * that hangs on Apply is an immediate one.
+     * for longer than LOCK_WAIT, must not stop somebody saving their settings.
+     * Losing the serialisation is a worse-but-rare outcome; a webGUI that hangs
+     * on Apply is an immediate one. LOCK_WAIT is the same number rc.docktail
+     * waits, so a held lock means the same thing on both sides.
+     *
+     * Readers pass LOCK_SH, which lets concurrent page renders and status polls
+     * through while still excluding a writer mid-rename.
      *
      * @template T
      * @param  callable(): T $work
+     * @param  int           $operation LOCK_EX to write, LOCK_SH to read
      * @return T
      */
-    private static function withLock(callable $work)
+    private static function withLock(callable $work, int $operation = LOCK_EX)
     {
         $handle = @fopen(self::LOCK_FILE, 'c');
         if ($handle === false) {
             return $work();
         }
 
+        // Nobody but root has any business holding this: a shared lock taken by
+        // another local user would push every writer past the wait below and
+        // out to the fails-open path, which is the serialisation gone.
+        @chmod(self::LOCK_FILE, 0600);
+
         // Non-blocking with a bounded retry, rather than waiting forever on
         // whatever is holding it.
-        for ($attempt = 0; $attempt < 40; $attempt++) {
-            if (@flock($handle, LOCK_EX | LOCK_NB)) {
+        for ($attempt = 0; $attempt < self::LOCK_WAIT * 20; $attempt++) {
+            if (@flock($handle, $operation | LOCK_NB)) {
                 break;
             }
             usleep(50_000);

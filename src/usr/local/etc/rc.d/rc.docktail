@@ -137,15 +137,36 @@ read_config() {
 # writer only holds it for two file writes. Missing flock, or a wait that runs
 # out, reads anyway and says so - never refuses to start.
 CONFIG_LOCK="/var/run/docktail-config.lock"
+
+# The same number Config::LOCK_WAIT uses on the PHP side, so a held lock means
+# the same thing whichever side hits it.
 CONFIG_LOCK_WAIT=5
 
 load_config() {
-  local file locked=0
+  local file locked=0 opened=1 previous_umask
 
   if ! command -v flock > /dev/null 2>&1; then
     log "Reading the config without the write lock: no flock on this system. A save landing in the middle of this read could be picked up half-applied."
-  elif exec 9>> "$CONFIG_LOCK" 2> /dev/null; then
-    if flock -s -w "$CONFIG_LOCK_WAIT" 9 2> /dev/null; then
+  else
+    # Created root-only, matching the PHP side: a shared lock held by another
+    # local user would push every writer out to its fails-open path. The umask
+    # is restored because this one is not scoped to the brace group, and the
+    # redirection is inside one because `exec` with no command would apply it
+    # to this shell for good - load_config() would then be silently discarding
+    # every later start and stop diagnostic.
+    previous_umask=$(umask)
+    umask 077
+    { exec 9>> "$CONFIG_LOCK"; } 2> /dev/null
+    opened=$?
+    umask "$previous_umask"
+
+    # The umask only covers creating it; an existing one from an older
+    # version of this plugin is tightened here, the way the PHP side does.
+    [ "$opened" -eq 0 ] && chmod 600 "$CONFIG_LOCK" 2> /dev/null
+
+    if [ "$opened" -ne 0 ]; then
+      log "Reading the config without the write lock: $CONFIG_LOCK could not be opened. A save landing in the middle of this read could be picked up half-applied."
+    elif flock -s -w "$CONFIG_LOCK_WAIT" 9 2> /dev/null; then
       locked=1
     else
       log "Reading the config without the write lock: still held after ${CONFIG_LOCK_WAIT}s. A save landing now could be picked up half-applied; the Apply that caused it restarts DockTail afterwards."
@@ -158,7 +179,7 @@ load_config() {
   done
 
   [ "$locked" = 1 ] && flock -u 9 2> /dev/null
-  exec 9>&- 2> /dev/null
+  { exec 9>&-; } 2> /dev/null
   return 0
 }
 
