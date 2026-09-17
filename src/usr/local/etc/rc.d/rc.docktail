@@ -247,7 +247,13 @@ start_docktail() {
   export_if_set DOCKTAIL_CLOUD_KEY "${DOCKTAIL_CLOUD_KEY}"
 
   log "Starting DockTail: $BIN"
-  nohup "$BIN" >> "$LOG" 2>&1 &
+  # 8 is the lifecycle lock, 9 the config lock. An inherited descriptor shares
+  # the open file description that owns the lock, so a daemon holding a copy
+  # keeps it alive: this shell's `flock -u` still releases it, but a shell
+  # killed before reaching that line - an `at` job cut short, a boot that
+  # times out - would leave the lock held for as long as DockTail runs. The
+  # daemon has no business holding either.
+  nohup "$BIN" >> "$LOG" 2>&1 8>&- 9>&- &
   echo $! > "$PIDFILE"
   return 0
 }

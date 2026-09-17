@@ -648,32 +648,81 @@ final class Config
     }
 
     /**
-     * Move staged files into place.
+     * Move staged files into place, and put back what was there if one of them
+     * fails once another has already landed.
+     *
+     * Renaming within a directory is the most reliable write a filesystem
+     * offers, but it is not free of failure, and the pair is only worth
+     * staging if a late failure cannot still publish half of it. What was on
+     * disk is read before the first rename and written back after a failed
+     * one, so the observable end states are: the new pair, or the old pair.
+     *
+     * The restore is itself a write and can itself fail - on a flash that has
+     * just failed a rename, that is not unlikely. There is nothing below it to
+     * fall back on; the caller reports a failed save either way, and the
+     * settings page then shows what is actually stored.
      *
      * @param array<string, array{string, int}> $staged destination => [staged path, mode]
      */
     private static function commitStaged(array $staged): bool
     {
-        $ok = true;
+        $previous = [];
+        foreach (array_keys($staged) as $file) {
+            $was            = @file_get_contents($file);
+            $previous[$file] = $was === false ? null : $was;
+        }
+
+        $landed = [];
         foreach ($staged as $file => [$tmp, $mode]) {
-            if ( ! @rename($tmp, $file)) {
-                @unlink($tmp);
-                $ok = false;
+            if (@rename($tmp, $file)) {
+                // Again after the rename: an existing file keeps its own mode
+                // through a rename onto it.
+                @chmod($file, $mode);
+                $landed[$file] = $mode;
                 continue;
             }
 
-            // Again after the rename: an existing file keeps its own mode
-            // through a rename onto it.
-            @chmod($file, $mode);
+            @unlink($tmp);
+            self::discardStaged(array_diff_key($staged, $landed));
+            self::restore($landed, $previous);
+
+            return false;
         }
 
-        return $ok;
+        return true;
+    }
+
+    /**
+     * @param array<string, int>          $landed   file => mode, already renamed
+     * @param array<string, string|null>  $previous file => bytes before, null if absent
+     */
+    private static function restore(array $landed, array $previous): void
+    {
+        foreach ($landed as $file => $mode) {
+            $was = $previous[$file] ?? null;
+            if ($was === null) {
+                // There was no file before this commit created one.
+                @unlink($file);
+                continue;
+            }
+
+            $tmp = $file . '.tmp';
+            if (@file_put_contents($tmp, $was) !== strlen($was)) {
+                @unlink($tmp);
+                continue;
+            }
+
+            @chmod($tmp, $mode);
+            if ( ! @rename($tmp, $file)) {
+                @unlink($tmp);
+            }
+        }
     }
 
     /** @param array<string, array{string, int}> $staged */
     private static function discardStaged(array $staged): void
     {
-        foreach ($staged as [$tmp, $mode]) {
+        foreach ($staged as [$tmp]) {
             @unlink($tmp);
         }
     }
@@ -1056,17 +1105,37 @@ final class Config
  * serialize() keeps the hidden csrf_token field, which Unraid's
  * auto_prepend_file requires on every POST.
  */
-var docktailApplyRequest = null;
-var docktailApplyDirty = false;
+/*
+ * On window, not in this script's scope: the settings page is an AJAX-injected
+ * fragment, so switching tabs and coming back re-runs this whole block. A
+ * `var` here would reset the in-flight marker while the POST it names is still
+ * running, which is exactly the guard below being asked to do its job.
+ */
+window.docktailApplyState = window.docktailApplyState || {
+    request: null,
+    dirty: false,
+    // A save whose answer never arrived. The form cannot be trusted to
+    // describe what is stored, and a retry could land behind it.
+    unknown: false,
+    bound: false
+};
 
 // An edit means the form no longer matches what was last written, so Apply has
 // to be usable whatever the previous answer was - otherwise a change made just
 // after a clean save, or while one was in flight, cannot be submitted without
 // reloading the tab.
 $(function() {
-    $('#docktail_settings').on('input change', 'input, select', function() {
-        docktailApplyDirty = true;
-        if ( ! docktailApplyRequest) {
+    var state = window.docktailApplyState;
+    if (state.bound) {
+        // Re-rendered fragment: the handler from the first render is still on
+        // the live element and would fire twice.
+        return;
+    }
+
+    state.bound = true;
+    $(document).on('input change', '#docktail_settings input, #docktail_settings select', function() {
+        state.dirty = true;
+        if ( ! state.request && ! state.unknown) {
             $('#docktail_settings').find('input[value="Apply"]').prop('disabled', false);
         }
     });
@@ -1076,21 +1145,36 @@ function docktailApply() {
     var form = $('#docktail_settings');
     var out = $('#docktail_apply_result');
     var apply = form.find('input[value="Apply"]');
+    var state = window.docktailApplyState;
 
     // One save at a time. Disabling Apply is not the guard: this function is
     // reachable programmatically and from a form submit, and two answers
     // arriving out of order would describe values the form no longer holds.
-    if (docktailApplyRequest) {
+    if (state.request) {
         return;
     }
 
-    docktailApplyDirty = false;
+    // A previous save timed out in the browser while the server kept going.
+    // Aborting the XHR stopped nothing: that request can still be inside
+    // Config::write(), and a retry accepted now could land first and then be
+    // overwritten by the older form it was meant to replace. Renames are
+    // atomic but they are not ordered, and nothing here can order them.
+    if (state.unknown) {
+        out.addClass('docktail-apply-error')
+           .text('A previous save timed out and may still be in progress. Reload the tab to see '
+                 + 'what is stored before saving again.');
+        apply.prop('disabled', true);
+
+        return;
+    }
+
+    state.dirty = false;
     out.removeClass('docktail-apply-error').text('Saving...');
     apply.prop('disabled', true);
 
     // Bounded like the Status tab's POSTs: Apply is disarmed until an answer
     // arrives, so a request left pending must time out or the form stays dead.
-    docktailApplyRequest = $.ajax({
+    state.request = $.ajax({
         url: form.attr('action'),
         type: 'POST',
         timeout: 25000,
@@ -1104,24 +1188,25 @@ function docktailApply() {
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
             out.toggleClass('docktail-apply-error', !!refused)
                .text(String(data).trim() || 'Settings saved.');
-            apply.prop('disabled', ! refused && ! docktailApplyDirty);
+            apply.prop('disabled', ! refused && ! state.dirty);
         })
         .fail(function(xhr, status) {
-            var detail = status === 'timeout'
+            // A 403 and an HTTP error both mean the write did not happen, so
+            // Apply is rearmed. A timeout means nobody knows, and a retry is
+            // refused above until the page is reloaded.
+            var timedOut = status === 'timeout';
+            var detail = timedOut
                 ? 'the request timed out. It may still have been applied - reload the tab to '
                   + 'see what is stored before retrying.'
                 : xhr.status === 403
                     ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
                     : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
             out.addClass('docktail-apply-error').text('Could not save: ' + detail);
-            // Rearmed: a browser-side timeout says nothing about what the
-            // server did, and a form that can never be submitted again is
-            // worse than a retry that may repeat a write which is atomic
-            // anyway - writeFile() renames into place.
-            apply.prop('disabled', false);
+            state.unknown = timedOut;
+            apply.prop('disabled', timedOut);
         })
         .always(function() {
-            docktailApplyRequest = null;
+            state.request = null;
         });
 }
 </script>
