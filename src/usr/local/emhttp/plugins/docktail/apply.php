@@ -48,7 +48,7 @@ switch ($action) {
             // Read by the page to keep Apply armed - see docktailApply().
             header('X-DockTail-Refused: ' . count($refused));
             printf(
-                "A backtick or a line break cannot be stored in a config value, so it was dropped from: %s.\n",
+                "A backtick, a line break or a NUL byte cannot be stored in a config value, so it was dropped from: %s.\n",
                 implode(', ', $refused)
             );
         }

@@ -46,7 +46,12 @@ unescape_value() {
   while [ -n "$in" ]; do
     head="${in:0:1}"
 
-    if [ "$head" = '\' ] && [ "${#in}" -gt 1 ]; then
+    if [ "$head" = '\' ]; then
+      # A backslash with nothing after it cannot have come from
+      # renderBody(), and PHP's ini parser would read the rest of the file
+      # differently, so the two sides would disagree about the value.
+      [ "${#in}" -gt 1 ] || return 1
+
       next="${in:1:1}"
       case "$next" in
         '\' | '"' | '$')
@@ -55,6 +60,11 @@ unescape_value() {
           continue
           ;;
       esac
+    elif [ "$head" = '"' ]; then
+      # An unescaped quote inside the value means the closing quote was not
+      # where the line said it was - reject rather than guess, because PHP
+      # reads such a line differently again.
+      return 1
     fi
 
     out="${out}${head}"
@@ -62,6 +72,7 @@ unescape_value() {
   done
 
   REPLY="$out"
+  return 0
 }
 
 # The only names a config file may set. Without this an uppercase-looking
@@ -105,7 +116,10 @@ read_config() {
       continue
     fi
 
-    unescape_value "$value"
+    if ! unescape_value "$value"; then
+      log "Ignoring $key in $file: the quoted value is malformed, so PHP and this reader would disagree about it."
+      continue
+    fi
     value="$REPLY"
 
     declare -g "$key=$value"

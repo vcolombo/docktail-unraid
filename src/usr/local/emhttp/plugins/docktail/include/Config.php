@@ -242,21 +242,33 @@ final class Config
      * would burn a flash write and recreate the credential temp file each
      * time, forever.
      *
-     * @return array{ok: bool, dropped: list<string>, ignored: list<string>}
-     *         ok is false only when a file that needed converting could not be
-     *         written; dropped names the fields whose value did not survive;
-     *         ignored names keys removed because nothing reads them
+     * @return array{ok: bool, dropped: list<string>, ignored: list<string>,
+     *         unparseable: list<string>} ok is false only when a file that
+     *         needed converting could not be written; dropped names the fields
+     *         whose value did not survive; ignored names keys removed because
+     *         nothing reads them; unparseable names files left alone because
+     *         PHP could not parse them at all
      */
     public static function normalizeStoredFiles(): array
     {
         return self::withLock(static function (): array {
-            $ok      = true;
-            $dropped = [];
-            $ignored = [];
+            $ok          = true;
+            $dropped     = [];
+            $ignored     = [];
+            $unparseable = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
                 $values = self::readFile($file);
                 if ($values === []) {
+                    // Empty and unparseable both arrive here as []. They are
+                    // not the same thing: a file PHP cannot parse is one the
+                    // settings page will show as defaults while rc.docktail's
+                    // line reader still uses whatever lines are valid, so an
+                    // Apply would overwrite settings that are in force. Not
+                    // rewritten blind - said out loud instead.
+                    if (is_file($file) && @filesize($file) > 0) {
+                        $unparseable[] = $file;
+                    }
                     continue;
                 }
 
@@ -308,7 +320,12 @@ final class Config
                 $ignored = array_merge($ignored, $unknown);
             }
 
-            return ['ok' => $ok, 'dropped' => $dropped, 'ignored' => $ignored];
+            return [
+                'ok'          => $ok,
+                'dropped'     => $dropped,
+                'ignored'     => $ignored,
+                'unparseable' => $unparseable,
+            ];
         });
     }
 
