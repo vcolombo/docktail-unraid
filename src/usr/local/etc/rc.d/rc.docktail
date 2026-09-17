@@ -287,15 +287,68 @@ status_docktail() {
   fi
 }
 
+# Lifecycle actions are serialised against each other. Every save schedules
+# restart.sh, which queues an independent `at` job, and the Docker events
+# queue their own - so two of these can land together, and none of the checks
+# below is atomic: two starts can both see is_running() false and leave two
+# daemons reconciling the same tailnet with $PIDFILE naming only one of them,
+# and a stop can kill a daemon the other invocation just started.
+#
+# Exclusive, and waited for rather than skipped: a queued restart exists
+# because somebody's settings changed, so it has to happen after the one in
+# flight, not instead of it. The bound is a whole stop plus its grace, past
+# which the holder is stuck rather than working and acting anyway is the
+# lesser evil. status stays outside: the settings page polls it while a
+# restart is running.
+RC_LOCK="/var/run/docktail-lifecycle.lock"
+RC_LOCK_WAIT=$((STOP_TIMEOUT + 10))
+
+serialised() {
+  local action="$1" locked=0 opened=1 previous_umask rc=0
+
+  if ! command -v flock > /dev/null 2>&1; then
+    log "Running $action without the lifecycle lock: no flock on this system. Another start or stop landing together with this one could leave two daemons."
+  else
+    # Same shape as the config lock above - root-only, umask restored, and the
+    # redirection inside a brace group so it does not apply to this shell.
+    previous_umask=$(umask)
+    umask 077
+    { exec 8>> "$RC_LOCK"; } 2> /dev/null
+    opened=$?
+    umask "$previous_umask"
+
+    [ "$opened" -eq 0 ] && chmod 600 "$RC_LOCK" 2> /dev/null
+
+    if [ "$opened" -ne 0 ]; then
+      log "Running $action without the lifecycle lock: $RC_LOCK could not be opened. Another start or stop landing together with this one could leave two daemons."
+    elif flock -w "$RC_LOCK_WAIT" 8 2> /dev/null; then
+      locked=1
+    else
+      log "Running $action without the lifecycle lock: still held after ${RC_LOCK_WAIT}s, which is longer than a stop can legitimately take."
+    fi
+  fi
+
+  case "$action" in
+  'start') start_docktail ;;
+  'stop') stop_docktail ;;
+  'restart') restart_docktail ;;
+  esac
+  rc=$?
+
+  [ "$locked" = 1 ] && flock -u 8 2> /dev/null
+  { exec 8>&-; } 2> /dev/null
+  return $rc
+}
+
 case "$1" in
 'start')
-  start_docktail
+  serialised start
   ;;
 'stop')
-  stop_docktail
+  serialised stop
   ;;
 'restart')
-  restart_docktail
+  serialised restart
   ;;
 'status')
   status_docktail
