@@ -232,13 +232,18 @@ final class Config
 
     /**
      * Re-write both files through writeFile(), so a value stored by a plugin
-     * version that escaped only \ and " stops being expanded when rc.docktail
-     * sources it. Run from doinst.sh: escaping new writes does nothing for the
-     * credential already sitting on the flash, and nothing rewrites it until
-     * the person next presses Apply.
+     * version that escaped only \ and " ends up in the one spelling both
+     * readers agree on. Run from doinst.sh, because writing new values
+     * correctly does nothing for the credential already sitting on the flash,
+     * and nothing rewrites it until the person next presses Apply.
      *
-     * PHP's ini parser never expanded these values, so what it reads back is
-     * the author's literal text - re-writing it escaped is the whole fix.
+     * This is no longer about safety. rc.docktail reads these files rather
+     * than sourcing them, so an unescaped `$` in a legacy value is inert
+     * either way - it just arrives at the daemon differently depending on
+     * which reader saw it, and PHP's ini parser is the one that would keep
+     * the backslash. Canonicalising removes that disagreement. It also drops
+     * keys nothing reads, which matters because renderBody() would otherwise
+     * canonicalise `enable_docktail` into a key the reader obeys.
      *
      * An unstorable value is dropped, and dropped differently from
      * coerceSecrets(), which writes every secret key and stores '' for a
