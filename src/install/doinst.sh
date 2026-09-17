@@ -17,7 +17,10 @@ php -r '
   require "/usr/local/emhttp/plugins/docktail/include/common.php";
   $r = \DockTail\Config::normalizeStoredFiles();
   foreach ($r["dropped"] as $field) {
-      echo "docktail: dropped the stored $field - it contained a backtick or a line break, which cannot be stored in these files\n";
+      echo "docktail: dropped the stored $field - it held a backtick or a line break, which cannot be stored in these files\n";
+  }
+  foreach ($r["ignored"] as $key) {
+      echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";
   }
   exit($r["ok"] ? 0 : 1);
 ' 2>/dev/null \

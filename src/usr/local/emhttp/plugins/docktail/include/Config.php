@@ -48,6 +48,30 @@ final class Config
     ];
 
     /**
+     * Every key a config file may carry, mirroring config_key_is_known() in
+     * rc.docktail. The migration needs it because renderBody() canonicalises a
+     * key - it uppercases and strips - so rewriting an unrecognised
+     * `enable_docktail="1"` would turn a line the reader ignores into one it
+     * obeys. Anything not here is removed rather than promoted.
+     *
+     * @var list<string>
+     */
+    public const KNOWN_KEYS = [
+        'ENABLE_DOCKTAIL',
+        'TAILSCALE_TAILNET',
+        'DEFAULT_SERVICE_TAGS',
+        'IGNORE_SERVICE_NAMES',
+        'DELETE_UNUSED_SERVICES',
+        'SKIP_SHUTDOWN_CLEANUP',
+        'RECONCILE_INTERVAL',
+        'LOG_LEVEL',
+        'TAILSCALE_OAUTH_CLIENT_ID',
+        'TAILSCALE_OAUTH_CLIENT_SECRET',
+        'TAILSCALE_API_KEY',
+        'DOCKTAIL_CLOUD_KEY',
+    ];
+
+    /**
      * Settings DockTail reads as a comma-separated list, where one bad entry
      * is dropped rather than the whole value - see normalizeList().
      *
@@ -218,16 +242,17 @@ final class Config
      * would burn a flash write and recreate the credential temp file each
      * time, forever.
      *
-     * @return array{ok: bool, dropped: list<string>} ok is false only when a
-     *         file that needed converting could not be written, because
-     *         rc.docktail would go on sourcing the raw values; dropped names
-     *         the fields whose value did not survive
+     * @return array{ok: bool, dropped: list<string>, ignored: list<string>}
+     *         ok is false only when a file that needed converting could not be
+     *         written; dropped names the fields whose value did not survive;
+     *         ignored names keys removed because nothing reads them
      */
     public static function normalizeStoredFiles(): array
     {
         return self::withLock(static function (): array {
             $ok      = true;
             $dropped = [];
+            $ignored = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
                 $values = self::readFile($file);
@@ -235,8 +260,19 @@ final class Config
                     continue;
                 }
 
-                $lost = [];
+                $lost    = [];
+                $unknown = [];
                 foreach ($values as $key => $value) {
+                    // renderBody() would uppercase and strip this key, which
+                    // turns a line rc.docktail ignores into one it obeys.
+                    // Removing it is the only rewrite that changes nothing
+                    // about what DockTail runs with.
+                    if ( ! in_array($key, self::KNOWN_KEYS, true)) {
+                        $unknown[] = $key;
+                        unset($values[$key]);
+                        continue;
+                    }
+
                     if ( ! self::containsUnstorable($value)) {
                         continue;
                     }
@@ -261,17 +297,18 @@ final class Config
                 }
 
                 if ( ! self::writeFile($file, $values, $mode)) {
-                    // Nothing was dropped: the legacy value is still on disk,
-                    // and saying otherwise would tell somebody a credential is
-                    // gone when it is still there being expanded.
+                    // Nothing changed on disk, so nothing is reported: saying
+                    // a credential was dropped while it is still sitting
+                    // there would be worse than saying nothing.
                     $ok = false;
                     continue;
                 }
 
                 $dropped = array_merge($dropped, $lost);
+                $ignored = array_merge($ignored, $unknown);
             }
 
-            return ['ok' => $ok, 'dropped' => $dropped];
+            return ['ok' => $ok, 'dropped' => $dropped, 'ignored' => $ignored];
         });
     }
 
@@ -402,6 +439,11 @@ final class Config
      * time: a value carrying a newline would be an unrecognised line and get
      * skipped, losing the setting rather than storing it.
      *
+     * A NUL, because a shell variable cannot hold one. PHP would store it
+     * happily and the reader could not reproduce it, so the two sides would
+     * disagree about what was saved - which is the whole failure this guard
+     * exists to prevent.
+     *
      * A backtick, because PHP's ini parser keeps the backslash of an escaped
      * one while bash strips it, so there is no single spelling both readers
      * agree on. rc.docktail no longer sources these files, so this is no
@@ -415,7 +457,7 @@ final class Config
      */
     private static function containsUnstorable(string $value): bool
     {
-        return strpbrk($value, "`\r\n") !== false;
+        return strpbrk($value, "`\r\n\0") !== false;
     }
 
     /**

@@ -64,6 +64,23 @@ unescape_value() {
   REPLY="$out"
 }
 
+# The only names a config file may set. Without this an uppercase-looking
+# assignment in a hand-edited or legacy file would land on one of this
+# script's own variables - BIN="/tmp/payload" would then be executed as root
+# by start_docktail(), and PGREP the same through is_running(). Mirrored by
+# Config::KNOWN_KEYS on the PHP side.
+config_key_is_known() {
+  case "$1" in
+    ENABLE_DOCKTAIL | TAILSCALE_TAILNET | DEFAULT_SERVICE_TAGS | IGNORE_SERVICE_NAMES | \
+    DELETE_UNUSED_SERVICES | SKIP_SHUTDOWN_CLEANUP | RECONCILE_INTERVAL | LOG_LEVEL | \
+    TAILSCALE_OAUTH_CLIENT_ID | TAILSCALE_OAUTH_CLIENT_SECRET | TAILSCALE_API_KEY | \
+    DOCKTAIL_CLOUD_KEY)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 read_config() {
   local file="$1" line key value
 
@@ -82,6 +99,11 @@ read_config() {
 
     key="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
+
+    if ! config_key_is_known "$key"; then
+      log "Ignoring $key in $file: not a DockTail setting."
+      continue
+    fi
 
     unescape_value "$value"
     value="$REPLY"
