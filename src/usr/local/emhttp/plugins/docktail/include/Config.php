@@ -325,14 +325,21 @@ final class Config
      */
     private static function withLock(callable $work, int $operation = LOCK_EX)
     {
+        // Created under 077, not created and then tightened: with a umask of
+        // 022 the file would exist as 0644 for the moment in between, long
+        // enough for another local user to open it read-only and hold a shared
+        // lock - which pushes every writer past the wait below and out to the
+        // fails-open path, the serialisation gone. rc.docktail does the same.
+        $previousUmask = umask(0077);
         $handle = @fopen(self::LOCK_FILE, 'c');
+        umask($previousUmask);
+
         if ($handle === false) {
             return $work();
         }
 
-        // Nobody but root has any business holding this: a shared lock taken by
-        // another local user would push every writer past the wait below and
-        // out to the fails-open path, which is the serialisation gone.
+        // An existing file from an older version of this plugin is tightened
+        // here, the way the shell side does it.
         @chmod(self::LOCK_FILE, 0600);
 
         // Non-blocking with a bounded retry, rather than waiting forever on
