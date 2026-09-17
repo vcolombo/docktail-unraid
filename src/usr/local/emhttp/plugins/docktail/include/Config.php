@@ -140,12 +140,27 @@ final class Config
     /** @return array<string, string> */
     private static function readFile(string $file): array
     {
+        return self::parseFile($file) ?? [];
+    }
+
+    /**
+     * Parsed values, or null when the file exists but PHP cannot parse it.
+     *
+     * Callers that only want values use readFile(); the migration needs the
+     * distinction, because a file that fails to parse is not the same as an
+     * empty one or one holding nothing but comments - only the first means the
+     * settings page and the service disagree about what is configured.
+     *
+     * @return array<string, string>|null
+     */
+    private static function parseFile(string $file): ?array
+    {
         if ( ! is_file($file)) {
             return [];
         }
         $parsed = @parse_ini_file($file);
 
-        return is_array($parsed) ? array_map('strval', $parsed) : [];
+        return is_array($parsed) ? array_map('strval', $parsed) : null;
     }
 
     /**
@@ -258,17 +273,20 @@ final class Config
             $unparseable = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
-                $values = self::readFile($file);
+                $values = self::parseFile($file);
+                if ($values === null) {
+                    // A file PHP cannot parse is one the settings page will
+                    // show as defaults while rc.docktail's line reader still
+                    // uses whatever lines are valid, so the two disagree about
+                    // what is configured. Not rewritten blind - guessing at a
+                    // file PHP cannot read is how a credential gets lost - so
+                    // it is named instead. A file that is empty or holds only
+                    // comments parses fine and is simply left alone.
+                    $unparseable[] = $file;
+                    continue;
+                }
+
                 if ($values === []) {
-                    // Empty and unparseable both arrive here as []. They are
-                    // not the same thing: a file PHP cannot parse is one the
-                    // settings page will show as defaults while rc.docktail's
-                    // line reader still uses whatever lines are valid, so an
-                    // Apply would overwrite settings that are in force. Not
-                    // rewritten blind - said out loud instead.
-                    if (is_file($file) && @filesize($file) > 0) {
-                        $unparseable[] = $file;
-                    }
                     continue;
                 }
 
@@ -471,10 +489,18 @@ final class Config
      * `$` is not in here: renderBody() escapes it as `\$`, which PHP reads
      * back as a plain `$` and rc.docktail unescapes the same way, so a
      * credential containing one is stored and read back intact.
+     *
+     * Note the callers trim() first, so a line break or a NUL at either end
+     * is removed rather than refused - a token pasted with a trailing newline
+     * still saves. Only one inside the value is refused, which is the case no
+     * amount of trimming can rescue.
      */
     private static function containsUnstorable(string $value): bool
     {
-        return strpbrk($value, "`\r\n\0") !== false;
+        // NUL checked on its own: strpbrk()'s character list is a C string,
+        // and while PHP 8.5 does match a NUL in it, nothing in the docs
+        // promises that, and strpos() is free.
+        return strpos($value, "\0") !== false || strpbrk($value, "`\r\n") !== false;
     }
 
     /**
@@ -594,10 +620,11 @@ final class Config
     <code>0600</code>, which the plugin excludes from Unraid Connect's flash backup so it is
     never uploaded to the cloud.
     <br><br>
-    A backtick or a line break in a credential is refused rather than stored: the service
-    reads this file one <code>KEY="value"</code> line at a time, and neither survives that
-    round trip. Every other character, <code>$</code> included, is stored as typed; spaces at
-    either end are trimmed.
+    A backtick <em>inside</em> a credential is refused rather than stored, as is a line break
+    or a NUL: the service reads this file one <code>KEY="value"</code> line at a time, and
+    none of the three survives that round trip. Whitespace at either end &mdash; including a
+    trailing newline from a paste &mdash; is trimmed rather than refused. Every other
+    character, <code>$</code> included, is stored as typed.
 </blockquote>
 
 <dl>

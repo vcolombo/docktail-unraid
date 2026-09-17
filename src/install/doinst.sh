@@ -23,7 +23,7 @@ php -r '
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";
   }
   foreach ($r["unparseable"] as $file) {
-      echo "docktail: left $file alone - PHP cannot parse it, so the settings page will show defaults while the service still reads whatever lines are valid. Press Apply to rewrite it.\n";
+      echo "docktail: left $file alone - PHP cannot parse it, so the settings page shows defaults while the service still reads whatever lines are valid. Repair the file (keep a copy first); pressing Apply would save the defaults over what is running.\n";
   }
   exit($r["ok"] ? 0 : 1);
 ' 2>/dev/null \
