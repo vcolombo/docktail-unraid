@@ -38,7 +38,7 @@ php -d display_errors=stderr -r '
       echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }
   foreach ($r["protected"] as $file) {
-      echo "docktail: tightened $file to 0600 - it holds a credential and PHP cannot parse it, so the credential cannot be moved out of it. Repair the file and press Apply.\n";
+      echo "docktail: tightened $file to 0600 - it holds a credential that cannot be moved out of it, so its contents are no longer world-readable\n";
   }
   foreach ($r["exposed"] as $file) {
       echo "docktail: $file holds a credential, cannot be parsed, and could not even be made private - the credential is readable by every local user. Fix its permissions and repair the file.\n";

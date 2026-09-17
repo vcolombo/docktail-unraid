@@ -229,6 +229,17 @@ final class Config
                 continue;
             }
 
+            // A NUL is the one byte the shell cannot carry: bash drops it
+            // silently, so `declare -g` there produces a shorter string than
+            // this function would return, and the two readers would disagree
+            // about a value neither can spell. Refused on this side too, so
+            // the settings page shows a default rather than a value the
+            // service is not using, and the migration removes the line.
+            if (strpos($value, "\0") !== false) {
+                $malformed[] = $m[1];
+                continue;
+            }
+
             $values[$m[1]] = $value;
         }
 
@@ -362,7 +373,7 @@ final class Config
         if ($handle === false) {
             self::logUnlocked(self::LOCK_FILE . ' could not be opened', $operation);
 
-            return $work();
+            return $work(false);
         }
 
         // An existing file from an older version of this plugin is tightened
@@ -385,7 +396,11 @@ final class Config
         }
 
         try {
-            return $work();
+            // Whether the lock was actually taken. Most of the work here is
+            // safe either way - that is what failing open means - but removing
+            // another writer's staged file is not tidying up if that writer is
+            // still using it.
+            return $work($locked);
         } finally {
             @flock($handle, LOCK_UN);
             @fclose($handle);
@@ -484,7 +499,7 @@ final class Config
      */
     public static function normalizeStoredFiles(): array
     {
-        return self::withLock(static function (): array {
+        return self::withLock(static function (bool $locked): array {
             $modes = [self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600];
 
             // No running total for ok: a file that cannot be converted
@@ -506,10 +521,16 @@ final class Config
             // What each staged file would report, held back until it lands.
             $pending = [];
 
-            // Temps from a writer that died, or from two writers racing past
-            // the fail-open lock. They are named per pid, so nothing else will
-            // ever pick them up, and this runs at boot with the lock held.
-            self::sweepAbandonedTemps(array_keys($modes));
+            // Temps from a writer that died between staging and committing.
+            // Only with the lock actually in hand: this deliberately fails
+            // open after five seconds, and a slow writer past that point still
+            // owns its staged file. A pid in the name does not say whether
+            // that pid is still working - and the writer would be another
+            // process's, not this one's, so checking liveness would be a race
+            // of its own.
+            if ($locked) {
+                self::sweepAbandonedTemps(array_keys($modes));
+            }
 
             // Read both before writing either: a secret in the settings file
             // has to know whether the credentials file already holds one.
@@ -546,6 +567,15 @@ final class Config
             }
 
             $state = self::relocateSecrets($state, $report);
+
+            // A credential that could not be moved stays in the settings file,
+            // so that file is no longer a file whose contents are public. Done
+            // now rather than left to the rewrite below: nothing else about
+            // the file may have changed, and then there is no rewrite.
+            if ($report['stranded'] !== []) {
+                $modes[self::SETTINGS_FILE] = 0600;
+                $report[@chmod(self::SETTINGS_FILE, 0600) ? 'protected' : 'exposed'][] = self::SETTINGS_FILE;
+            }
 
             foreach ($modes as $file => $mode) {
                 if ( ! $state[$file]['usable']) {
@@ -675,7 +705,13 @@ final class Config
             }
 
             if ( ! $state[self::CREDENTIALS_FILE]['usable']) {
-                $report['stranded'][] = $label;
+                // Put back: there is nowhere to move it to, and rewriting the
+                // settings file without it would delete a working credential
+                // while the log said it had been left alone. It stays, and the
+                // file it stays in is written 0600 instead of 0644 - the
+                // exposure is the mode, and both readers of it are root.
+                $state[self::SETTINGS_FILE]['values'][$key] = $value;
+                $report['stranded'][]                       = $label;
                 continue;
             }
 
@@ -889,10 +925,19 @@ final class Config
      */
     private static function commitStaged(array $staged): bool
     {
+        // Contents and mode: a settings file that was tightened to 0600
+        // because it holds a credential must not come back from a rollback at
+        // the 0644 the new one was going to have.
         $previous = [];
         foreach (array_keys($staged) as $file) {
-            $was            = @file_get_contents($file);
-            $previous[$file] = $was === false ? null : $was;
+            $was = @file_get_contents($file);
+            if ($was === false) {
+                $previous[$file] = null;
+                continue;
+            }
+
+            $mode            = @fileperms($file);
+            $previous[$file] = [$was, $mode === false ? 0600 : ($mode & 0777)];
         }
 
         $landed = [];
@@ -901,12 +946,12 @@ final class Config
                 // Again after the rename: an existing file keeps its own mode
                 // through a rename onto it.
                 @chmod($file, $mode);
-                $landed[$file] = $mode;
+                $landed[] = $file;
                 continue;
             }
 
             @unlink($tmp);
-            self::discardStaged(array_diff_key($staged, $landed));
+            self::discardStaged(array_diff_key($staged, array_flip($landed)));
             self::restore($landed, $previous);
 
             return false;
@@ -916,22 +961,25 @@ final class Config
     }
 
     /**
-     * @param array<string, int>          $landed   file => mode, already renamed
-     * @param array<string, string|null>  $previous file => bytes before, null if absent
+     * @param list<string>                                 $landed   files already renamed
+     * @param array<string, array{string, int}|null>       $previous file => [bytes, mode] before, null if absent
      */
     private static function restore(array $landed, array $previous): void
     {
-        foreach ($landed as $file => $mode) {
-            $was = $previous[$file] ?? null;
-            if ($was === null) {
+        foreach ($landed as $file) {
+            $before = $previous[$file] ?? null;
+            if ($before === null) {
                 // There was no file before this commit created one.
                 @unlink($file);
                 continue;
             }
 
-            // Staged the same way as a new value, because it is the same
-            // secret: the old credentials must not sit in a loose temp while
-            // the restore runs either.
+            // The mode it had, not the mode the new one was going to have: a
+            // settings file holding a stranded credential is 0600, and putting
+            // its bytes back at 0644 would publish them. Staged the same way
+            // as a new value, so the bytes are never in a loose temp either.
+            [$was, $mode] = $before;
+
             $tmp = self::stageBytes($file, $was, $mode);
             if ($tmp === false) {
                 continue;
@@ -939,7 +987,10 @@ final class Config
 
             if ( ! @rename($tmp, $file)) {
                 @unlink($tmp);
+                continue;
             }
+
+            @chmod($file, $mode);
         }
     }
 

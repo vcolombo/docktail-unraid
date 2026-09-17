@@ -107,6 +107,16 @@ config_key_is_known() {
 read_config() {
   local file="$1" line key value
 
+  # A NUL cannot be carried by a shell variable at all: `read` drops it, so
+  # this reader would hand DockTail a shorter string than PHP's reader returns
+  # for the same line, and the two would disagree about a value neither can
+  # spell. PHP refuses those records outright and the migration removes them,
+  # which normally happens before this runs - doinst.sh is the boot path. If
+  # one is still here, it is worth a line rather than a silent truncation.
+  if [ "$(tr -d '\0' < "$file" | wc -c)" != "$(wc -c < "$file")" ]; then
+    log "$file contains a NUL byte: the shell cannot carry one, so any value holding it is read short here and ignored by the settings page. The next Apply removes the line."
+  fi
+
   while IFS= read -r line || [ -n "$line" ]; do
     # Trailing CR, so a file that has been through a Windows editor still reads.
     line="${line%$'\r'}"
@@ -298,10 +308,29 @@ stop_docktail() {
   fi
   case "$recorded" in
   '' | *[!0-9]*) recorded="" ;;
+  # 0 is a process group, not a process: `kill 0` signals this script's own
+  # group. 1 is init. Neither is ever DockTail.
+  0 | 1) recorded="" ;;
   esac
 
+  # And it has to actually be DockTail. A pidfile outlives its process, pids
+  # are reused, and this branch runs precisely when is_running() has already
+  # said nothing matching $BIN is visible - so without this check a stale
+  # pidfile would aim TERM and then KILL at whatever root process inherited
+  # the number. /proc is the authority, not the file.
+  #
+  # Matched anywhere in the command line rather than at the front, because
+  # this is the window before the exec: the pid may still be `nohup $BIN`, or
+  # the interpreter of a $BIN that is a script.
+  if [ -n "$recorded" ]; then
+    case "$(tr '\0' ' ' < "/proc/$recorded/cmdline" 2> /dev/null)" in
+    *"$BIN"*) ;;
+    *) recorded="" ;;
+    esac
+  fi
+
   if ! is_running; then
-    if [ -n "$recorded" ] && kill -0 "$recorded" 2> /dev/null; then
+    if [ -n "$recorded" ]; then
       log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
       kill -TERM "$recorded" 2> /dev/null
       local settle=0
