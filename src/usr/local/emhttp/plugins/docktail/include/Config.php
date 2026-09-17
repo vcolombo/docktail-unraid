@@ -335,6 +335,8 @@ final class Config
         umask($previousUmask);
 
         if ($handle === false) {
+            self::logUnlocked(self::LOCK_FILE . ' could not be opened', $operation);
+
             return $work();
         }
 
@@ -344,11 +346,17 @@ final class Config
 
         // Non-blocking with a bounded retry, rather than waiting forever on
         // whatever is holding it.
+        $locked = false;
         for ($attempt = 0; $attempt < self::LOCK_WAIT * 20; $attempt++) {
             if (@flock($handle, $operation | LOCK_NB)) {
+                $locked = true;
                 break;
             }
             usleep(50_000);
+        }
+
+        if ( ! $locked) {
+            self::logUnlocked('still held after ' . self::LOCK_WAIT . 's', $operation);
         }
 
         try {
@@ -357,6 +365,36 @@ final class Config
             @flock($handle, LOCK_UN);
             @fclose($handle);
         }
+    }
+
+    /**
+     * Failing open is deliberate, but silent failing open is not diagnosable:
+     * a page that read one file from a save and the other from the previous
+     * one looks like a plugin bug and leaves no trace of the interleaving.
+     * rc.docktail says the same thing into the same file, so both sides of
+     * the pair read alike in /var/log/docktail.log.
+     *
+     * The same lock is taken from two places: a page render or an Apply under
+     * the webGUI, and the migration under doinst.sh at boot. Which one hit the
+     * contention is the first thing worth knowing, and only one of them runs
+     * from the CLI.
+     */
+    private static function logUnlocked(string $reason, int $operation): void
+    {
+        $consequence = $operation === LOCK_SH
+            ? 'A save landing in the middle of this read could be picked up half-applied.'
+            : 'A save landing together with this one could leave one file from each.';
+
+        $line = sprintf(
+            "%s %s: %s the config without the lock: %s. %s\n",
+            date('Y-m-d H:i:s'),
+            PHP_SAPI === 'cli' ? 'config migration' : 'settings page',
+            $operation === LOCK_SH ? 'Reading' : 'Writing',
+            $reason,
+            $consequence
+        );
+
+        @file_put_contents(defined('LOG_FILE') ? LOG_FILE : '/var/log/docktail.log', $line, FILE_APPEND);
     }
 
     /**

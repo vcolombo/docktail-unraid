@@ -13,7 +13,15 @@ chown root:root /etc/logrotate.d/docktail
 # Both outcomes are said out loud, because neither is visible anywhere else:
 # a value dropped for carrying a backtick or a line break, and a file that
 # needed converting but could not be written. Neither is fatal to the install.
-php -r '
+# /tmp is world-writable and this runs as root at boot, so the file is created
+# by mktemp rather than named - a pre-existing symlink at a guessable path
+# would otherwise be a root write anywhere on the system.
+migration_err=$(mktemp 2> /dev/null) || migration_err=/dev/null
+
+# display_errors is pinned to stderr because php-cli defaults it to STDOUT,
+# where a warning would be indistinguishable from this script's own report
+# lines - and where the old 2>/dev/null never suppressed it either.
+php -d display_errors=stderr -r '
   require "/usr/local/emhttp/plugins/docktail/include/common.php";
   $r = \DockTail\Config::normalizeStoredFiles();
   foreach ($r["dropped"] as $field) {
@@ -29,5 +37,16 @@ php -r '
       echo "docktail: left $file alone - PHP cannot parse it, so the settings page shows defaults while the service still reads whatever lines are valid. Repair the file (keep a copy first); pressing Apply would save the defaults over what is running.\n";
   }
   exit($r["ok"] ? 0 : 1);
-' 2>/dev/null \
-  || echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail reads it either way, but PHP's reader and the shell reader only agree on the escaped form until an Apply rewrites it"
+' 2> "$migration_err" \
+  || {
+    echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail reads it either way, but PHP's reader and the shell reader only agree on the escaped form until an Apply rewrites it"
+    # And why, which the line above cannot say: a missing php, a parse error
+    # and a broken include path all land here and look identical without it.
+    # A non-zero exit with nothing on stderr is the ordinary case - a file
+    # that needed converting but could not be written - so this stays quiet.
+    while IFS= read -r line; do
+      echo "docktail: php said: $line"
+    done < "$migration_err"
+  }
+
+[ "$migration_err" = /dev/null ] || rm -f "$migration_err"
