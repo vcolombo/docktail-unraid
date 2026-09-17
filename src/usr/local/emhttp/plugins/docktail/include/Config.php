@@ -630,9 +630,37 @@ final class Config
      */
     private static function stageFile(string $file, array $values, int $mode): string|false
     {
-        $body = self::renderBody($values);
-        $tmp  = $file . '.tmp';
-        if (@file_put_contents($tmp, $body) !== strlen($body)) {
+        return self::stageBytes($file, self::renderBody($values), $mode);
+    }
+
+    /**
+     * Write bytes to a temp beside where they are going, private from the
+     * moment they exist.
+     *
+     * The secret goes in before any chmod could run, so the mode has to be
+     * right at creation: `credentials.cfg.tmp` sitting 0644 in a 0755
+     * directory with the whole OAuth client in it is the same leak as the real
+     * file having the wrong mode. A left-over temp is removed rather than
+     * written into, because an existing file keeps its own mode, and `x`
+     * refuses to follow one - or a symlink somebody put there.
+     *
+     * @return string|false the staged path, or false if nothing was staged
+     */
+    private static function stageBytes(string $file, string $body, int $mode): string|false
+    {
+        $tmp = $file . '.tmp';
+
+        @unlink($tmp);
+        $previousUmask = umask(0077);
+        $handle        = @fopen($tmp, 'x');
+        umask($previousUmask);
+        if ($handle === false) {
+            return false;
+        }
+
+        $written = @fwrite($handle, $body);
+        @fclose($handle);
+        if ($written !== strlen($body)) {
             // A short write leaves a truncated temp, and the flash filling up
             // is exactly when that happens. Renaming it would publish it.
             @unlink($tmp);
@@ -640,8 +668,9 @@ final class Config
             return false;
         }
 
-        // Before the rename, so the file is never briefly world-readable at
-        // its final name.
+        // Widening, where the file is meant to be readable: settings are 0644.
+        // Before the rename, so the file is never briefly wrong at its final
+        // name.
         @chmod($tmp, $mode);
 
         return $tmp;
@@ -706,13 +735,14 @@ final class Config
                 continue;
             }
 
-            $tmp = $file . '.tmp';
-            if (@file_put_contents($tmp, $was) !== strlen($was)) {
-                @unlink($tmp);
+            // Staged the same way as a new value, because it is the same
+            // secret: the old credentials must not sit in a loose temp while
+            // the restore runs either.
+            $tmp = self::stageBytes($file, $was, $mode);
+            if ($tmp === false) {
                 continue;
             }
 
-            @chmod($tmp, $mode);
             if ( ! @rename($tmp, $file)) {
                 @unlink($tmp);
             }
@@ -1141,10 +1171,26 @@ $(function() {
     });
 });
 
-function docktailApply() {
+/*
+ * Looked up on every use rather than held: an AJAX-injected fragment can be
+ * replaced between a POST leaving and its answer arriving, and the nodes this
+ * page started with are then detached - still writable, and invisible.
+ */
+function docktailApplyNodes() {
     var form = $('#docktail_settings');
-    var out = $('#docktail_apply_result');
-    var apply = form.find('input[value="Apply"]');
+
+    return {
+        form: form,
+        out: $('#docktail_apply_result'),
+        apply: form.find('input[value="Apply"]')
+    };
+}
+
+function docktailApply() {
+    var nodes = docktailApplyNodes();
+    var form = nodes.form;
+    var out = nodes.out;
+    var apply = nodes.apply;
     var state = window.docktailApplyState;
 
     // One save at a time. Disabling Apply is not the guard: this function is
@@ -1154,15 +1200,15 @@ function docktailApply() {
         return;
     }
 
-    // A previous save timed out in the browser while the server kept going.
-    // Aborting the XHR stopped nothing: that request can still be inside
-    // Config::write(), and a retry accepted now could land first and then be
-    // overwritten by the older form it was meant to replace. Renames are
-    // atomic but they are not ordered, and nothing here can order them.
+    // A previous save timed out, or its connection dropped, while the server
+    // kept going. Aborting the XHR stopped nothing: that request can still be
+    // inside Config::write(), and a retry accepted now could land first and
+    // then be overwritten by the older form it was meant to replace. Renames
+    // are atomic but they are not ordered, and nothing here can order them.
     if (state.unknown) {
         out.addClass('docktail-apply-error')
-           .text('A previous save timed out and may still be in progress. Reload the tab to see '
-                 + 'what is stored before saving again.');
+           .text('A previous save did not report back and may still be in progress. Reload the '
+                 + 'tab to see what is stored before saving again.');
         apply.prop('disabled', true);
 
         return;
@@ -1181,29 +1227,43 @@ function docktailApply() {
         data: form.serialize()
     })
         .done(function(data, status, xhr) {
+            // Re-selected, not closed over: the fragment may have been
+            // replaced while this POST was open, and writing to the nodes this
+            // call started with would put the answer into a detached form
+            // nobody can see.
+            var live = docktailApplyNodes();
+
             // A refused value is a partial save: flag it like a failure and
             // rearm Apply, because the person has a value to correct and would
             // otherwise have to reload the tab to resubmit it. An edit made
             // while this was in flight rearms it for the same reason.
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
-            out.toggleClass('docktail-apply-error', !!refused)
-               .text(String(data).trim() || 'Settings saved.');
-            apply.prop('disabled', ! refused && ! state.dirty);
+            live.out.toggleClass('docktail-apply-error', !!refused)
+                .text(String(data).trim() || 'Settings saved.');
+            live.apply.prop('disabled', ! refused && ! state.dirty);
         })
         .fail(function(xhr, status) {
-            // A 403 and an HTTP error both mean the write did not happen, so
-            // Apply is rearmed. A timeout means nobody knows, and a retry is
-            // refused above until the page is reloaded.
-            var timedOut = status === 'timeout';
-            var detail = timedOut
+            var live = docktailApplyNodes();
+
+            // Two outcomes say nothing about what the server did: a timeout,
+            // and a transport failure (status 0 - the connection dropped, or
+            // the tab navigated) which can land after PHP has already written
+            // the pair. Both leave Apply disarmed, because a retry could be
+            // overtaken by the save it was meant to replace. A 403 and an HTTP
+            // status mean the write did not happen and are safe to retry.
+            var unknown = status === 'timeout' || xhr.status === 0;
+            var detail = status === 'timeout'
                 ? 'the request timed out. It may still have been applied - reload the tab to '
                   + 'see what is stored before retrying.'
-                : xhr.status === 403
-                    ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
-                    : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
-            out.addClass('docktail-apply-error').text('Could not save: ' + detail);
-            state.unknown = timedOut;
-            apply.prop('disabled', timedOut);
+                : xhr.status === 0
+                    ? 'the connection dropped before an answer arrived. It may still have been '
+                      + 'applied - reload the tab to see what is stored.'
+                    : xhr.status === 403
+                        ? 'the webGUI rejected the request (CSRF). Reload the page and try again.'
+                        : 'HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+            live.out.addClass('docktail-apply-error').text('Could not save: ' + detail);
+            state.unknown = unknown;
+            live.apply.prop('disabled', unknown);
         })
         .always(function() {
             state.request = null;
