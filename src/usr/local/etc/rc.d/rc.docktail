@@ -107,14 +107,16 @@ config_key_is_known() {
 read_config() {
   local file="$1" line key value
 
-  # A NUL cannot be carried by a shell variable at all: `read` drops it, so
-  # this reader would hand DockTail a shorter string than PHP's reader returns
-  # for the same line, and the two would disagree about a value neither can
-  # spell. PHP refuses those records outright and the migration removes them,
-  # which normally happens before this runs - doinst.sh is the boot path. If
-  # one is still here, it is worth a line rather than a silent truncation.
+  # The whole file, not the line. A NUL cannot be carried by a shell variable
+  # at all: `read` drops it before the pattern below ever sees it, so this
+  # reader cannot tell which record held one - and a NUL inside a *key* would
+  # close up into a name it recognises. PHP's reader refuses every line of such
+  # a file for the same reason, so refusing it here too is what keeps the two
+  # in agreement; the migration reports it as unparseable and leaves it alone,
+  # and DockTail falls back to default.cfg for whatever it held.
   if [ "$(tr -d '\0' < "$file" | wc -c)" != "$(wc -c < "$file")" ]; then
-    log "$file contains a NUL byte: the shell cannot carry one, so any value holding it is read short here and ignored by the settings page. The next Apply removes the line."
+    log "Ignoring $file: it contains a NUL byte, which this reader cannot carry and PHP's reader refuses, so neither would agree about a single line of it. Repair the file; the settings page shows the shipped defaults for whatever it held."
+    return 0
   fi
 
   while IFS= read -r line || [ -n "$line" ]; do
@@ -295,6 +297,32 @@ start_docktail() {
   return 0
 }
 
+# pid_is_docktail PID - is this pid, right now, the DockTail this script runs?
+#
+# A pidfile outlives its process and pids are reused, so the file alone is not
+# evidence: without this a stale one would aim TERM and then KILL at whatever
+# root process inherited the number. /proc is the authority.
+#
+# 0 is a process group rather than a process - `kill 0` signals this script's
+# own group - and 1 is init; neither is ever DockTail. The command line is
+# matched anywhere rather than at the front, because the window this exists for
+# is before the exec: the pid may still be `nohup $BIN`, or the interpreter of
+# a $BIN that is a script.
+pid_is_docktail() {
+  local pid="$1"
+
+  case "$pid" in
+  '' | *[!0-9]* | 0 | 1) return 1 ;;
+  esac
+
+  case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null)" in
+  *"$BIN"*) return 0 ;;
+  esac
+
+  return 1
+}
+
+
 stop_docktail() {
   # The pidfile, not just what is visible: a start whose shell was killed
   # between the fork and the exec releases the lifecycle lock as it dies, so a
@@ -306,39 +334,20 @@ stop_docktail() {
   if [ -f "$PIDFILE" ]; then
     recorded=$(cat "$PIDFILE" 2> /dev/null)
   fi
-  case "$recorded" in
-  '' | *[!0-9]*) recorded="" ;;
-  # 0 is a process group, not a process: `kill 0` signals this script's own
-  # group. 1 is init. Neither is ever DockTail.
-  0 | 1) recorded="" ;;
-  esac
-
-  # And it has to actually be DockTail. A pidfile outlives its process, pids
-  # are reused, and this branch runs precisely when is_running() has already
-  # said nothing matching $BIN is visible - so without this check a stale
-  # pidfile would aim TERM and then KILL at whatever root process inherited
-  # the number. /proc is the authority, not the file.
-  #
-  # Matched anywhere in the command line rather than at the front, because
-  # this is the window before the exec: the pid may still be `nohup $BIN`, or
-  # the interpreter of a $BIN that is a script.
-  if [ -n "$recorded" ]; then
-    case "$(tr '\0' ' ' < "/proc/$recorded/cmdline" 2> /dev/null)" in
-    *"$BIN"*) ;;
-    *) recorded="" ;;
-    esac
-  fi
 
   if ! is_running; then
-    if [ -n "$recorded" ]; then
+    # Re-checked immediately before each signal rather than once up front: the
+    # settle loop below can outlast the process, and a pid freed in it can be
+    # handed to something else before the SIGKILL lands.
+    if pid_is_docktail "$recorded"; then
       log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
       kill -TERM "$recorded" 2> /dev/null
       local settle=0
-      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && kill -0 "$recorded" 2> /dev/null; do
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$recorded"; do
         sleep 1
         settle=$((settle + 1))
       done
-      kill -KILL "$recorded" 2> /dev/null
+      pid_is_docktail "$recorded" && kill -KILL "$recorded" 2> /dev/null
     else
       log "DockTail is not running."
     fi

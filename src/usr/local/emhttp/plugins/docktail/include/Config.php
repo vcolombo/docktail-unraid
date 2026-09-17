@@ -204,12 +204,23 @@ final class Config
     {
         $values    = [];
         $malformed = [];
+        $body      = (string) @file_get_contents($file);
+
+        // The whole file, not the line: a NUL is the one byte the shell cannot
+        // carry, and `read` drops it before the pattern match runs - so the
+        // shell cannot tell which record held it, and a NUL inside a *key*
+        // could even close up into a name it recognises. Neither reader can
+        // agree with the other on a single line of such a file, so both refuse
+        // all of it and say so. rc.docktail does the same check, the same way.
+        if (strpos($body, "\0") !== false) {
+            return ['values' => [], 'malformed' => [], 'nul' => true];
+        }
 
         // Split on \n by hand: file() with FILE_IGNORE_NEW_LINES strips a
         // whole \r\n, where `read -r` keeps the \r and the reader then drops
         // exactly one. Getting that wrong accepts KEY="1"\r\r - a line the
         // service skips - and promotes it.
-        foreach (explode("\n", (string) @file_get_contents($file)) as $line) {
+        foreach (explode("\n", $body) as $line) {
             if (str_ends_with($line, "\r")) {
                 $line = substr($line, 0, -1);
             }
@@ -243,7 +254,7 @@ final class Config
             $values[$m[1]] = $value;
         }
 
-        return ['values' => $values, 'malformed' => $malformed];
+        return ['values' => $values, 'malformed' => $malformed, 'nul' => false];
     }
 
     /**
@@ -536,12 +547,17 @@ final class Config
             // has to know whether the credentials file already holds one.
             $state = [];
             foreach (array_keys($modes) as $file) {
-                // Reported, not rewritten: a file PHP cannot parse is one the
-                // settings page shows as defaults while the service still uses
-                // whatever lines are valid, and guessing at it is how a
-                // credential gets lost. An empty or comments-only file parses
-                // fine and is simply left alone.
-                if (is_file($file) && self::parseFile($file) === null) {
+                $read = is_file($file)
+                    ? self::parseAsReader($file)
+                    : ['values' => [], 'malformed' => [], 'nul' => false];
+
+                // Reported, not rewritten: a file PHP cannot parse - or one
+                // holding a NUL, which neither reader will take - is one the
+                // settings page shows as defaults while the service uses
+                // whatever it can read, and guessing at it is how a credential
+                // gets lost. An empty or comments-only file parses fine and is
+                // simply left alone.
+                if (is_file($file) && (self::parseFile($file) === null || $read['nul'])) {
                     $report['unparseable'][] = $file;
                     $state[$file]            = ['values' => [], 'malformed' => [], 'usable' => false];
 
@@ -562,19 +578,28 @@ final class Config
                     continue;
                 }
 
-                $read         = is_file($file) ? self::parseAsReader($file) : ['values' => [], 'malformed' => []];
                 $state[$file] = ['values' => $read['values'], 'malformed' => $read['malformed'], 'usable' => true];
             }
 
             $state = self::relocateSecrets($state, $report);
 
             // A credential that could not be moved stays in the settings file,
-            // so that file is no longer a file whose contents are public. Done
-            // now rather than left to the rewrite below: nothing else about
-            // the file may have changed, and then there is no rewrite.
+            // so that file is no longer a file whose contents are public.
             if ($report['stranded'] !== []) {
                 $modes[self::SETTINGS_FILE] = 0600;
-                $report[@chmod(self::SETTINGS_FILE, 0600) ? 'protected' : 'exposed'][] = self::SETTINGS_FILE;
+            }
+
+            // Enforced whether or not the bytes change, and before the
+            // rewrite: a file already in canonical form is never rewritten -
+            // that is the flash-write saving - so this is the only thing that
+            // would ever tighten a credentials file an older version left at
+            // 0644, or the settings file that just kept a stranded secret.
+            foreach ($modes as $file => $mode) {
+                if ($mode !== 0600 || ! is_file($file) || (@fileperms($file) & 0777) === 0600) {
+                    continue;
+                }
+
+                $report[@chmod($file, 0600) ? 'protected' : 'exposed'][] = $file;
             }
 
             foreach ($modes as $file => $mode) {
@@ -770,8 +795,15 @@ final class Config
     private static function sweepAbandonedTemps(array $files): void
     {
         foreach ($files as $file) {
-            foreach (glob($file . '.tmp.*') ?: [] as $stale) {
-                @unlink($stale);
+            // `<file>.tmp` as well as the per-pid names: versions of this
+            // plugin before the pid suffix staged there, and a credentials
+            // write that failed under one of them left the whole secret in
+            // `credentials.cfg.tmp` at whatever mode it had. Nothing reads it
+            // and nothing else would ever remove it.
+            foreach (array_merge([$file . '.tmp'], glob($file . '.tmp.*') ?: []) as $stale) {
+                if (is_file($stale)) {
+                    @unlink($stale);
+                }
             }
         }
     }
