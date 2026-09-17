@@ -15,6 +15,12 @@ DOCKER_SOCK="/var/run/docker.sock"
 TAILSCALED_SOCK="/var/run/tailscale/tailscaled.sock"
 PGREP="/usr/bin/pgrep"
 PKILL="/usr/bin/pkill"
+TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Used before any config or lifecycle locking: those paths invoke flock and
+# chmod as root, and the fail-open branches are only meant for a genuinely
+# missing utility or a held lock, not for an inherited PATH.
+export PATH="$TRUSTED_PATH"
 
 # Seconds to wait for a graceful drain before SIGKILL. Must exceed DockTail's
 # own 30s shutdown cleanup context: cutting it short leaves stale Tailscale
@@ -226,7 +232,7 @@ start_docktail() {
 
   # DockTail resolves the tailscale CLI from PATH; the Tailscale plugin
   # symlinks it into /usr/local/sbin.
-  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH="$TRUSTED_PATH"
 
   export_if_set RECONCILE_INTERVAL "${RECONCILE_INTERVAL}"
   export_if_set LOG_LEVEL "${LOG_LEVEL}"

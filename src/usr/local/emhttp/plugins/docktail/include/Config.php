@@ -569,7 +569,8 @@ final class Config
     {
         $body = self::renderBody($values);
         $tmp = $file . '.tmp';
-        if (@file_put_contents($tmp, $body) === false) {
+        if (@file_put_contents($tmp, $body) !== strlen($body)) {
+            @unlink($tmp);
             return false;
         }
         @chmod($tmp, $mode);
