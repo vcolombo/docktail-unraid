@@ -120,21 +120,22 @@ final class Config
     public static function read(): array
     {
         return self::withLock(static function (): array {
+            // Every read on this side goes through the same parser the service
+            // uses, rather than parse_ini_file() or Unraid's
+            // parse_plugin_cfg(). Both of those run PHP's ini scanner, which
+            // turns an unquoted `true` into `1` and an unquoted `none` into
+            // nothing, while rc.docktail's reader keeps the text. Quoted
+            // values - all this plugin writes - come back identically either
+            // way, so nothing changes for a file the settings page wrote; what
+            // this removes is the disagreement over a hand-edited line, where
+            // the page would show a value the service is not using.
+            //
+            // parse_plugin_cfg() is not needed for its merge either: it layers
+            // default.cfg under the stored settings, which is what defaults()
+            // does here, from the same file.
             $values = self::defaults();
-
-            // parse_plugin_cfg() is only defined when Unraid's webGUI helpers
-            // are loaded (i.e. on a .page render), so the endpoints get a
-            // plain merge.
-            if (function_exists('parse_plugin_cfg')) {
-                $merged = \parse_plugin_cfg(PLUGIN_NAME);
-                if (is_array($merged)) {
-                    $values = array_merge($values, array_map('strval', $merged));
-                }
-            } else {
-                $values = array_merge($values, self::readFile(self::SETTINGS_FILE));
-            }
-
-            $values = array_merge($values, self::readFile(self::CREDENTIALS_FILE));
+            $values = array_merge($values, self::readAsService(self::SETTINGS_FILE));
+            $values = array_merge($values, self::readAsService(self::CREDENTIALS_FILE));
 
             foreach (self::SECRET_KEYS as $key) {
                 $values[$key] ??= '';
@@ -147,13 +148,19 @@ final class Config
     /** @return array<string, string> */
     public static function defaults(): array
     {
-        return self::readFile(PLUGIN_ROOT . '/default.cfg');
+        return self::readAsService(PLUGIN_ROOT . '/default.cfg');
     }
 
-    /** @return array<string, string> */
-    private static function readFile(string $file): array
+    /**
+     * The values rc.docktail would export from this file, and only those: a
+     * line it skips is a line the service does not act on, so showing it on
+     * the settings page would describe a configuration that is not running.
+     *
+     * @return array<string, string>
+     */
+    private static function readAsService(string $file): array
     {
-        return self::parseFile($file) ?? [];
+        return self::parseAsReader($file)['values'];
     }
 
     /**
@@ -456,14 +463,24 @@ final class Config
      * rewrite would burn a flash write and recreate the credential temp file
      * each time, forever.
      *
-     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
-     *         protected: list<string>, ignored: list<string>,
-     *         malformed: list<string>, unparseable: list<string>} ok is false only when a file that
-     *         needed converting could not be written; dropped names fields
-     *         whose value did not survive; moved names secrets relocated out
-     *         of the settings file; ignored names keys nothing reads;
-     *         malformed names lines the service skips on syntax alone;
-     *         unparseable names files PHP could not parse at all
+     * Every outcome is reported under its own reason, because they ask
+     * different things of whoever reads the boot log.
+     *
+     * @return array{ok: bool, dropped: list<string>, superseded: list<string>,
+     *         stranded: list<string>, moved: list<string>,
+     *         protected: list<string>, exposed: list<string>,
+     *         ignored: list<string>, malformed: list<string>,
+     *         unparseable: list<string>}
+     *         ok is false only when a file that needed converting could not be
+     *         written; dropped names fields whose value could not be stored;
+     *         superseded names settings-file secrets that lost to a credential
+     *         already stored; stranded names ones that could not be moved
+     *         because the credentials file is unparseable; moved names secrets
+     *         relocated into the 0600 file; protected names files tightened to
+     *         0600 because they hold a credential and cannot be rewritten;
+     *         exposed names ones where even that failed; ignored names keys
+     *         nothing reads; malformed names lines the service skips on syntax
+     *         alone; unparseable names files PHP could not parse at all
      */
     public static function normalizeStoredFiles(): array
     {
@@ -472,16 +489,27 @@ final class Config
 
             // No running total for ok: a file that cannot be converted
             // abandons the whole migration, so reaching the end means it
-            // worked.
-            $dropped     = [];
-            $moved       = [];
-            $ignored     = [];
-            $malformed   = [];
-            $unparseable = [];
-            $protected   = [];
-            $staged      = [];
+            // worked. One array, because every field of it is a category of
+            // thing to say out loud and they are filled from three places.
+            $report = [
+                'dropped'     => [],
+                'superseded'  => [],
+                'stranded'    => [],
+                'moved'       => [],
+                'protected'   => [],
+                'exposed'     => [],
+                'ignored'     => [],
+                'malformed'   => [],
+                'unparseable' => [],
+            ];
+            $staged = [];
             // What each staged file would report, held back until it lands.
             $pending = [];
+
+            // Temps from a writer that died, or from two writers racing past
+            // the fail-open lock. They are named per pid, so nothing else will
+            // ever pick them up, and this runs at boot with the lock held.
+            self::sweepAbandonedTemps(array_keys($modes));
 
             // Read both before writing either: a secret in the settings file
             // has to know whether the credentials file already holds one.
@@ -493,16 +521,21 @@ final class Config
                 // credential gets lost. An empty or comments-only file parses
                 // fine and is simply left alone.
                 if (is_file($file) && self::parseFile($file) === null) {
-                    $unparseable[] = $file;
-                    $state[$file]  = ['values' => [], 'malformed' => [], 'usable' => false];
+                    $report['unparseable'][] = $file;
+                    $state[$file]            = ['values' => [], 'malformed' => [], 'usable' => false];
 
                     // The secret cannot be moved out of a file that cannot be
                     // rewritten - rewriting it is what would lose the lines
                     // PHP choked on. The exposure is the file's mode, not its
                     // contents, so the mode is what changes: both readers of
                     // this file run as root.
-                    if (self::holdsSecret($file) && @chmod($file, 0600)) {
-                        $protected[] = $file;
+                    if (self::holdsSecret($file)) {
+                        // A credential left readable because even the chmod
+                        // failed is the loudest thing this function can find,
+                        // and saying nothing about it was the bug.
+                        $key = @chmod($file, 0600) ? 'protected' : 'exposed';
+
+                        $report[$key][] = $file;
                     }
 
                     continue;
@@ -512,7 +545,7 @@ final class Config
                 $state[$file] = ['values' => $read['values'], 'malformed' => $read['malformed'], 'usable' => true];
             }
 
-            $state = self::relocateSecrets($state, $moved, $dropped);
+            $state = self::relocateSecrets($state, $report);
 
             foreach ($modes as $file => $mode) {
                 if ( ! $state[$file]['usable']) {
@@ -570,7 +603,7 @@ final class Config
                     // both files exactly as the old version left them.
                     self::discardStaged($staged);
 
-                    return self::migrationFailed($unparseable, $protected);
+                    return self::migrationFailed($report);
                 }
 
                 $staged[$file] = [$tmp, $mode];
@@ -583,24 +616,16 @@ final class Config
             // A moved secret is two writes - out of one file, into the other -
             // so a half-landed pair would duplicate it at 0644.
             if ($staged !== [] && ! self::commitStaged($staged)) {
-                return self::migrationFailed($unparseable, $protected);
+                return self::migrationFailed($report);
             }
 
             foreach ($pending as [$lost, $unknown, $broken]) {
-                $dropped   = array_merge($dropped, $lost);
-                $ignored   = array_merge($ignored, $unknown);
-                $malformed = array_merge($malformed, $broken);
+                $report['dropped']   = array_merge($report['dropped'], $lost);
+                $report['ignored']   = array_merge($report['ignored'], $unknown);
+                $report['malformed'] = array_merge($report['malformed'], $broken);
             }
 
-            return [
-                'ok'          => true,
-                'dropped'     => $dropped,
-                'moved'       => $moved,
-                'protected'   => $protected,
-                'ignored'     => $ignored,
-                'malformed'   => $malformed,
-                'unparseable' => $unparseable,
-            ];
+            return ['ok' => true] + $report;
         });
     }
 
@@ -620,7 +645,7 @@ final class Config
      * @param  list<string> $dropped filled with the fields discarded
      * @return array<string, array{values: array<string, string>, malformed: list<string>, usable: bool}>
      */
-    private static function relocateSecrets(array $state, array &$moved, array &$dropped): array
+    private static function relocateSecrets(array $state, array &$report): array
     {
         if ( ! $state[self::SETTINGS_FILE]['usable']) {
             return $state;
@@ -635,20 +660,32 @@ final class Config
             unset($state[self::SETTINGS_FILE]['values'][$key]);
             $label = self::REFUSABLE_FIELDS[$key] ?? $key;
 
+            // Each outcome is reported under its own reason, because they call
+            // for different things from whoever reads the log: a value that
+            // cannot be stored needs correcting, one that lost to an existing
+            // credential needs nothing, and one stranded by an unparseable
+            // credentials file needs that file repaired.
+            if ($value === '') {
+                continue;
+            }
+
+            if (self::containsUnstorable($value)) {
+                $report['dropped'][] = $label;
+                continue;
+            }
+
+            if ( ! $state[self::CREDENTIALS_FILE]['usable']) {
+                $report['stranded'][] = $label;
+                continue;
+            }
+
             // What is already in the credentials file only wins if it is going
             // to survive this migration. A value carrying a backtick is about
             // to be dropped by the pass below, and preferring it over a usable
             // legacy value would leave the person with no credential at all.
             $existing = $state[self::CREDENTIALS_FILE]['values'][$key] ?? '';
-            $occupied = $existing !== '' && ! self::containsUnstorable($existing);
-
-            // Reported as dropped rather than moved when it cannot be stored:
-            // the pass below would drop it on arrival, and saying both about
-            // the same field describes a move that never happened.
-            $storable = $value !== '' && ! self::containsUnstorable($value);
-
-            if ( ! $storable || $occupied || ! $state[self::CREDENTIALS_FILE]['usable']) {
-                $dropped[] = $label;
+            if ($existing !== '' && ! self::containsUnstorable($existing)) {
+                $report['superseded'][] = $label;
                 continue;
             }
 
@@ -656,11 +693,11 @@ final class Config
             // somebody set through the settings page, and it is only being
             // overwritten because this migration cannot store it.
             if ($existing !== '') {
-                $dropped[] = $label;
+                $report['dropped'][] = $label;
             }
 
             $state[self::CREDENTIALS_FILE]['values'][$key] = $value;
-            $moved[]                                       = $label;
+            $report['moved'][]                             = $label;
         }
 
         return $state;
@@ -686,25 +723,45 @@ final class Config
     }
 
     /**
-     * @param  list<string> $unparseable
-     * @param  list<string> $protected
-     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
-     *         protected: list<string>, ignored: list<string>,
-     *         malformed: list<string>, unparseable: list<string>}
+     * Remove staged files nobody is going to commit.
+     *
+     * A temp is named per pid and per call, so one left behind is one whose
+     * writer died between staging and committing - nothing will ever pick it
+     * up again. Run from the migration, which holds the lock at boot.
+     *
+     * @param list<string> $files the destinations whose temps to sweep
      */
-    private static function migrationFailed(array $unparseable, array $protected): array
+    private static function sweepAbandonedTemps(array $files): void
     {
-        // Nothing changed on disk, so nothing is reported: saying a credential
-        // was dropped while it is still sitting there would be worse than
-        // saying nothing. The mode change is reported, because it did happen.
+        foreach ($files as $file) {
+            foreach (glob($file . '.tmp.*') ?: [] as $stale) {
+                @unlink($stale);
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, list<string>> $report what happened before the write failed
+     * @return array<string, bool|list<string>>
+     */
+    private static function migrationFailed(array $report): array
+    {
+        // Nothing landed on disk, so the file-level reports are dropped:
+        // saying a credential was moved while it is still sitting where it was
+        // would be worse than saying nothing. What did happen regardless of
+        // the write - a mode tightened, a credential left exposed, a file that
+        // cannot be parsed - is kept, because those are true either way.
         return [
             'ok'          => false,
             'dropped'     => [],
+            'superseded'  => [],
+            'stranded'    => $report['stranded'],
             'moved'       => [],
-            'protected'   => $protected,
+            'protected'   => $report['protected'],
+            'exposed'     => $report['exposed'],
             'ignored'     => [],
             'malformed'   => [],
-            'unparseable' => $unparseable,
+            'unparseable' => $report['unparseable'],
         ];
     }
 
@@ -770,19 +827,24 @@ final class Config
      * moment they exist.
      *
      * The secret goes in before any chmod could run, so the mode has to be
-     * right at creation: `credentials.cfg.tmp` sitting 0644 in a 0755
+     * right at creation: a `credentials.cfg` temp sitting 0644 in a 0755
      * directory with the whole OAuth client in it is the same leak as the real
-     * file having the wrong mode. A left-over temp is removed rather than
-     * written into, because an existing file keeps its own mode, and `x`
-     * refuses to follow one - or a symlink somebody put there.
+     * file having the wrong mode. `x` creates it or fails, so it never follows
+     * a symlink somebody left at the name, and never inherits the mode of a
+     * file already there.
+     *
+     * The name carries the pid and eight random hex digits, because the lock
+     * around all of this deliberately fails open after five seconds: two
+     * writers can be here at once, and on one fixed `.tmp` path the second
+     * would unlink the first's staged bytes and the commit would publish
+     * whichever won. Abandoned temps are swept by the migration at boot.
      *
      * @return string|false the staged path, or false if nothing was staged
      */
     private static function stageBytes(string $file, string $body, int $mode): string|false
     {
-        $tmp = $file . '.tmp';
+        $tmp = sprintf('%s.tmp.%d.%s', $file, getmypid(), bin2hex(random_bytes(4)));
 
-        @unlink($tmp);
         $previousUmask = umask(0077);
         $handle        = @fopen($tmp, 'x');
         umask($previousUmask);
@@ -1423,20 +1485,29 @@ function docktailApply() {
         .fail(function(xhr, status) {
             var live = docktailApplyNodes();
 
-            // Two outcomes say nothing about what the server did: a timeout,
-            // and a transport failure (status 0 - the connection dropped, or
-            // the tab navigated) which can land after PHP has already written
-            // the pair. Both leave Apply disarmed with the Reload button that
-            // clears the state, because a retry could be overtaken by the save
-            // it was meant to replace. A 403 and an HTTP status mean the write
-            // did not happen and are safe to retry.
-            if (status === 'timeout' || xhr.status === 0) {
+            // Three outcomes say nothing about what is on disk. A timeout and
+            // a transport failure (status 0 - the connection dropped, or the
+            // tab navigated) can both land after PHP has already written the
+            // pair. So can a 500: Config::write() reports failure for a rename
+            // that failed after an earlier one succeeded, and if the restore
+            // failed as well the pair on disk is mixed. All three leave Apply
+            // disarmed with the Reload button that clears the state, because a
+            // retry could be overtaken by the save it was meant to replace, or
+            // be written on top of a state nobody has looked at.
+            //
+            // A 403 is the exception: Unraid's CSRF check runs before any of
+            // this plugin's code, so nothing was written and a retry is safe.
+            if (status === 'timeout' || xhr.status === 0 || xhr.status >= 500) {
                 state.unknown = true;
                 docktailApplyUnknown(live, status === 'timeout'
                     ? 'Could not save: the request timed out, and it may still have been applied. '
                       + 'Reload to see what is stored: '
-                    : 'Could not save: the connection dropped before an answer arrived, and it may '
-                      + 'still have been applied. Reload to see what is stored: ');
+                    : xhr.status === 0
+                        ? 'Could not save: the connection dropped before an answer arrived, and it '
+                          + 'may still have been applied. Reload to see what is stored: '
+                        : 'Could not save: the server reported HTTP ' + xhr.status + '. Part of the '
+                          + 'save may have been written - see /var/log/docktail.log. Reload to see '
+                          + 'what is stored: ');
 
                 return;
             }

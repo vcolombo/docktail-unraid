@@ -28,11 +28,20 @@ php -d display_errors=stderr -r '
   foreach ($r["dropped"] as $field) {
       echo "docktail: dropped the stored $field - it held a backtick, a line break or a NUL byte, none of which can be stored in these files\n";
   }
+  foreach ($r["superseded"] as $field) {
+      echo "docktail: removed a second $field from docktail.cfg - credentials.cfg already holds one, and that is the one in use\n";
+  }
+  foreach ($r["stranded"] as $field) {
+      echo "docktail: left the stored $field in docktail.cfg - it belongs in credentials.cfg, which PHP cannot parse. Repair that file and press Apply.\n";
+  }
   foreach ($r["moved"] as $field) {
       echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }
   foreach ($r["protected"] as $file) {
       echo "docktail: tightened $file to 0600 - it holds a credential and PHP cannot parse it, so the credential cannot be moved out of it. Repair the file and press Apply.\n";
+  }
+  foreach ($r["exposed"] as $file) {
+      echo "docktail: $file holds a credential, cannot be parsed, and could not even be made private - the credential is readable by every local user. Fix its permissions and repair the file.\n";
   }
   foreach ($r["ignored"] as $key) {
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";

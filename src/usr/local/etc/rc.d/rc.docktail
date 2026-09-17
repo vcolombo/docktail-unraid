@@ -286,9 +286,40 @@ start_docktail() {
 }
 
 stop_docktail() {
+  # The pidfile, not just what is visible: a start whose shell was killed
+  # between the fork and the exec releases the lifecycle lock as it dies, so a
+  # stop can arrive while that child exists but does not match yet. Its pid was
+  # written before the wait, so it can still be found - and killing it here is
+  # the difference between a stop that worked and a daemon that comes up behind
+  # it with nothing tracking it.
+  local recorded=""
+  if [ -f "$PIDFILE" ]; then
+    recorded=$(cat "$PIDFILE" 2> /dev/null)
+  fi
+  case "$recorded" in
+  '' | *[!0-9]*) recorded="" ;;
+  esac
+
   if ! is_running; then
-    log "DockTail is not running."
+    if [ -n "$recorded" ] && kill -0 "$recorded" 2> /dev/null; then
+      log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
+      kill -TERM "$recorded" 2> /dev/null
+      local settle=0
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && kill -0 "$recorded" 2> /dev/null; do
+        sleep 1
+        settle=$((settle + 1))
+      done
+      kill -KILL "$recorded" 2> /dev/null
+    else
+      log "DockTail is not running."
+    fi
+
     rm -f "$PIDFILE"
+
+    # Whatever was launched may still have exec'd in the window above; the
+    # pattern kill below is what catches it.
+    "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+
     return 0
   fi
 
