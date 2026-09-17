@@ -290,6 +290,11 @@ final class Config
      *
      * The lock lives in /var/run - see LOCK_FILE - so taking it costs no flash
      * write and no unprivileged process can hold it first.
+     * rc.docktail takes it too, shared, before reading the pair - see
+     * load_config() there. Writers alone are not enough: a start landing
+     * between the two renames reads one file from this save and the other from
+     * the last one, and the boot path is where that collides, because
+     * doinst.sh runs the migration below while the service is starting.
      *
      * It fails open twice over: an unopenable lock file, or one already held
      * for longer than the wait below, must not stop somebody saving their

@@ -126,12 +126,39 @@ read_config() {
   done < "$file"
 }
 
+# The webGUI writes the two files under a lock, one rename each, so reading
+# them without it can pick up the new settings with the previous credentials -
+# an OAuth client ID beside the secret it replaced. The boot path is where this
+# actually collides: Unraid reinstalls the plugin on every boot, and doinst.sh
+# takes the same lock to convert legacy files while this script is starting.
+#
+# Shared, so concurrent starts do not wait on each other, and bounded: a boot
+# that hangs on a lock is a worse failure than one stale reconcile cycle, and a
+# writer only holds it for two file writes. Missing flock, or a wait that runs
+# out, reads anyway and says so - never refuses to start.
+CONFIG_LOCK="/var/run/docktail-config.lock"
+CONFIG_LOCK_WAIT=5
+
 load_config() {
+  local file locked=0
+
+  if ! command -v flock > /dev/null 2>&1; then
+    log "Reading the config without the write lock: no flock on this system. A save landing in the middle of this read could be picked up half-applied."
+  elif exec 9>> "$CONFIG_LOCK" 2> /dev/null; then
+    if flock -s -w "$CONFIG_LOCK_WAIT" 9 2> /dev/null; then
+      locked=1
+    else
+      log "Reading the config without the write lock: still held after ${CONFIG_LOCK_WAIT}s. A save landing now could be picked up half-applied; the Apply that caused it restarts DockTail afterwards."
+    fi
+  fi
+
   # Defaults first, user settings on top, then secrets.
-  local file
   for file in "${PLUGIN_ROOT}/default.cfg" "${CONFIG_DIR}/docktail.cfg" "${CONFIG_DIR}/credentials.cfg"; do
     [ -f "$file" ] && read_config "$file"
   done
+
+  [ "$locked" = 1 ] && flock -u 9 2> /dev/null
+  exec 9>&- 2> /dev/null
   return 0
 }
 
