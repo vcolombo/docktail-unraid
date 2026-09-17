@@ -11,8 +11,9 @@ chown root:root /etc/logrotate.d/docktail
 # converted.
 #
 # Both outcomes are said out loud, because neither is visible anywhere else:
-# a value dropped for carrying a backtick or a line break, and a file that
-# needed converting but could not be written. Neither is fatal to the install.
+# a value dropped for carrying a backtick or a line break, a secret moved out
+# of the world-readable settings file, and a file that needed converting but
+# could not be written. None of them is fatal to the install.
 # /tmp is world-writable and this runs as root at boot, so the file is created
 # by mktemp rather than named - a pre-existing symlink at a guessable path
 # would otherwise be a root write anywhere on the system.
@@ -26,6 +27,9 @@ php -d display_errors=stderr -r '
   $r = \DockTail\Config::normalizeStoredFiles();
   foreach ($r["dropped"] as $field) {
       echo "docktail: dropped the stored $field - it held a backtick, a line break or a NUL byte, none of which can be stored in these files\n";
+  }
+  foreach ($r["moved"] as $field) {
+      echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }
   foreach ($r["ignored"] as $key) {
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";

@@ -416,11 +416,11 @@ final class Config
     }
 
     /**
-     * Re-write both files through writeFile(), so a value stored by a plugin
-     * version that escaped only \ and " ends up in the one spelling both
-     * readers agree on. Run from doinst.sh, because writing new values
-     * correctly does nothing for the credential already sitting on the flash,
-     * and nothing rewrites it until the person next presses Apply.
+     * Re-write both files through stageFile() and commitStaged(), so a value
+     * stored by a plugin version that escaped only \ and " ends up in the one
+     * spelling both readers agree on. Run from doinst.sh, because writing new
+     * values correctly does nothing for the credential already sitting on the
+     * flash, and nothing rewrites it until the person next presses Apply.
      *
      * This is no longer about safety. rc.docktail reads these files rather
      * than sourcing them, so an unescaped `$` in a legacy value is inert
@@ -429,6 +429,14 @@ final class Config
      * the backslash. Canonicalising removes that disagreement. It also drops
      * keys nothing reads, which matters because renderBody() would otherwise
      * canonicalise `enable_docktail` into a key the reader obeys.
+     *
+     * A secret found in docktail.cfg is moved rather than rewritten. Both
+     * files are read into one config, so a hand-edited or legacy API key in
+     * the settings file works - and rewriting it there would re-publish it at
+     * 0644, which is the whole reason the credentials file exists. It moves
+     * into the 0600 file if that file has nothing under the same key, and is
+     * dropped if it does: a credential the person set through the settings
+     * page is the one to keep.
      *
      * An unstorable value is dropped, and dropped differently from
      * coerceSecrets(), which writes every secret key and stores '' for a
@@ -440,26 +448,33 @@ final class Config
      * returned rather than swallowed: an upgrade that empties a saved
      * credential has to say so.
      *
-     * A file that is missing or unparseable is left alone; there is nothing to
-     * normalise and overwriting it would lose settings. Nothing is written
+     * A file that is unparseable is left alone; there is nothing to normalise
+     * and overwriting it would lose settings. A missing credentials file is
+     * created only if there is a secret to move into it. Nothing is written
      * unless the escaped rendering actually differs from what is on the flash:
-     * Unraid reinstalls the package on every boot, so an unconditional rewrite
-     * would burn a flash write and recreate the credential temp file each
-     * time, forever.
+     * Unraid reinstalls the package on every boot, so an unconditional
+     * rewrite would burn a flash write and recreate the credential temp file
+     * each time, forever.
      *
-     * @return array{ok: bool, dropped: list<string>, ignored: list<string>,
-     *         malformed: list<string>, unparseable: list<string>} ok is false
-     *         only when a file that needed converting could not be written;
-     *         dropped names fields whose value did not survive; ignored names
-     *         keys nothing reads; malformed names lines the service skips on
-     *         syntax alone; unparseable names files PHP could not parse at all
+     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
+     *         ignored: list<string>, malformed: list<string>,
+     *         unparseable: list<string>} ok is false only when a file that
+     *         needed converting could not be written; dropped names fields
+     *         whose value did not survive; moved names secrets relocated out
+     *         of the settings file; ignored names keys nothing reads;
+     *         malformed names lines the service skips on syntax alone;
+     *         unparseable names files PHP could not parse at all
      */
     public static function normalizeStoredFiles(): array
     {
         return self::withLock(static function (): array {
-            // No running total: a file that cannot be converted abandons the
-            // whole migration below, so reaching the end means it worked.
+            $modes = [self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600];
+
+            // No running total for ok: a file that cannot be converted
+            // abandons the whole migration, so reaching the end means it
+            // worked.
             $dropped     = [];
+            $moved       = [];
             $ignored     = [];
             $malformed   = [];
             $unparseable = [];
@@ -467,30 +482,40 @@ final class Config
             // What each staged file would report, held back until it lands.
             $pending = [];
 
-            foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
-                if ( ! is_file($file)) {
-                    continue;
-                }
-
+            // Read both before writing either: a secret in the settings file
+            // has to know whether the credentials file already holds one.
+            $state = [];
+            foreach (array_keys($modes) as $file) {
                 // Reported, not rewritten: a file PHP cannot parse is one the
                 // settings page shows as defaults while the service still uses
                 // whatever lines are valid, and guessing at it is how a
                 // credential gets lost. An empty or comments-only file parses
                 // fine and is simply left alone.
-                if (self::parseFile($file) === null) {
-                    $unparseable[] = $file;
+                if (is_file($file) && self::parseFile($file) === null) {
+                    $unparseable[]  = $file;
+                    $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
                     continue;
                 }
 
-                $read   = self::parseAsReader($file);
-                $values = $read['values'];
-                if ($values === [] && $read['malformed'] === []) {
+                $read         = is_file($file) ? self::parseAsReader($file) : ['values' => [], 'malformed' => []];
+                $state[$file] = ['values' => $read['values'], 'malformed' => $read['malformed'], 'usable' => true];
+            }
+
+            $state = self::relocateSecrets($state, $moved, $dropped);
+
+            foreach ($modes as $file => $mode) {
+                if ( ! $state[$file]['usable']) {
+                    continue;
+                }
+
+                $values = $state[$file]['values'];
+                if ($values === [] && $state[$file]['malformed'] === [] && ! is_file($file)) {
                     continue;
                 }
 
                 $lost    = [];
                 $unknown = [];
-                $broken  = $read['malformed'];
+                $broken  = $state[$file]['malformed'];
                 foreach ($values as $key => $value) {
                     // Only keys the reader obeys survive the rewrite. Anything
                     // else - an unknown name, or a line the reader skips -
@@ -521,7 +546,7 @@ final class Config
                     $values[$key] = $cleaned;
                 }
 
-                if (self::renderBody($values) === @file_get_contents($file)) {
+                if (self::renderBody($values) === (string) @file_get_contents($file)) {
                     continue;
                 }
 
@@ -534,13 +559,7 @@ final class Config
                     // both files exactly as the old version left them.
                     self::discardStaged($staged);
 
-                    return [
-                        'ok'          => false,
-                        'dropped'     => [],
-                        'ignored'     => [],
-                        'malformed'   => [],
-                        'unparseable' => $unparseable,
-                    ];
+                    return self::migrationFailed($unparseable);
                 }
 
                 $staged[$file] = [$tmp, $mode];
@@ -550,14 +569,10 @@ final class Config
             // Both conversions land together or neither does: a rename that
             // fails after the first one succeeded is the same mixed pair, and
             // the reports are held back until the files are actually on disk.
+            // A moved secret is two writes - out of one file, into the other -
+            // so a half-landed pair would duplicate it at 0644.
             if ($staged !== [] && ! self::commitStaged($staged)) {
-                return [
-                    'ok'          => false,
-                    'dropped'     => [],
-                    'ignored'     => [],
-                    'malformed'   => [],
-                    'unparseable' => $unparseable,
-                ];
+                return self::migrationFailed($unparseable);
             }
 
             foreach ($pending as [$lost, $unknown, $broken]) {
@@ -569,11 +584,76 @@ final class Config
             return [
                 'ok'          => true,
                 'dropped'     => $dropped,
+                'moved'       => $moved,
                 'ignored'     => $ignored,
                 'malformed'   => $malformed,
                 'unparseable' => $unparseable,
             ];
         });
+    }
+
+    /**
+     * Take any secret out of the settings file.
+     *
+     * read() merges both files, so a secret in docktail.cfg is a working
+     * credential - and rewriting it where it sits would re-publish it at 0644.
+     * It moves into the 0600 file when that file has nothing under the key,
+     * and is dropped when it does, because a credential set through the
+     * settings page is the one to keep. If the credentials file cannot be
+     * written - unparseable - the secret is dropped rather than left behind in
+     * a file about to be rewritten world-readable.
+     *
+     * @param  array<string, array{values: array<string, string>, malformed: list<string>, usable: bool}> $state
+     * @param  list<string> $moved   filled with the fields relocated
+     * @param  list<string> $dropped filled with the fields discarded
+     * @return array<string, array{values: array<string, string>, malformed: list<string>, usable: bool}>
+     */
+    private static function relocateSecrets(array $state, array &$moved, array &$dropped): array
+    {
+        if ( ! $state[self::SETTINGS_FILE]['usable']) {
+            return $state;
+        }
+
+        foreach (self::SECRET_KEYS as $key) {
+            if ( ! isset($state[self::SETTINGS_FILE]['values'][$key])) {
+                continue;
+            }
+
+            $value = $state[self::SETTINGS_FILE]['values'][$key];
+            unset($state[self::SETTINGS_FILE]['values'][$key]);
+            $label = self::REFUSABLE_FIELDS[$key] ?? $key;
+
+            $occupied = ($state[self::CREDENTIALS_FILE]['values'][$key] ?? '') !== '';
+            if ($value === '' || $occupied || ! $state[self::CREDENTIALS_FILE]['usable']) {
+                $dropped[] = $label;
+                continue;
+            }
+
+            $state[self::CREDENTIALS_FILE]['values'][$key] = $value;
+            $moved[]                                       = $label;
+        }
+
+        return $state;
+    }
+
+    /**
+     * @param  list<string> $unparseable
+     * @return array{ok: bool, dropped: list<string>, moved: list<string>,
+     *         ignored: list<string>, malformed: list<string>, unparseable: list<string>}
+     */
+    private static function migrationFailed(array $unparseable): array
+    {
+        // Nothing changed on disk, so nothing is reported: saying a credential
+        // was dropped while it is still sitting there would be worse than
+        // saying nothing.
+        return [
+            'ok'          => false,
+            'dropped'     => [],
+            'moved'       => [],
+            'ignored'     => [],
+            'malformed'   => [],
+            'unparseable' => $unparseable,
+        ];
     }
 
     /**
@@ -1120,7 +1200,11 @@ final class Config
     <dd class="docktail-inline">
         <input type="submit" name="#apply" value="Apply">
         <input type="button" value="Done" onclick="done()">
-        <span id="docktail_apply_result" class="docktail-apply-result"></span>
+        <!-- A live region: the whole point of this span is that a refusal is
+             announced, and a screen reader has no other way to learn that a
+             save came back with a field it would not store. -->
+        <span id="docktail_apply_result" class="docktail-apply-result"
+              role="status" aria-live="polite" aria-atomic="true"></span>
     </dd>
 </dl>
 
@@ -1205,10 +1289,22 @@ function docktailApply() {
     // inside Config::write(), and a retry accepted now could land first and
     // then be overwritten by the older form it was meant to replace. Renames
     // are atomic but they are not ordered, and nothing here can order them.
+    //
+    // The way out is a page load, not a tab switch: this flag lives on window
+    // precisely so re-rendering the fragment cannot clear it, so the button
+    // that clears it is offered here rather than described.
     if (state.unknown) {
         out.addClass('docktail-apply-error')
-           .text('A previous save did not report back and may still be in progress. Reload the '
-                 + 'tab to see what is stored before saving again.');
+           .empty()
+           .append(document.createTextNode(
+               'A previous save did not report back and may still be in progress. '
+               + 'Reload to see what is stored before saving again: '
+           ))
+           .append($('<button type="button">')
+               .text('Reload')
+               .on('click', function() {
+                   window.location.reload();
+               }));
         apply.prop('disabled', true);
 
         return;
