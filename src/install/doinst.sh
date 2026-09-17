@@ -50,7 +50,7 @@ php -d display_errors=stderr -r '
       echo "docktail: removed $key from the stored config - the line was not valid KEY=\"value\", so the service was already skipping it\n";
   }
   foreach ($r["unparseable"] as $file) {
-      echo "docktail: left $file alone - PHP cannot parse it, so the settings page shows defaults while the service still reads whatever lines are valid. Repair the file (keep a copy first); pressing Apply would save the defaults over what is running.\n";
+      echo "docktail: left $file alone - it contains a NUL byte, which neither the settings page nor the service can read, so both fall back to the shipped defaults for whatever it held. Repair the file (keep a copy first); pressing Apply would save those defaults over it.\n";
   }
   exit($r["ok"] ? 0 : 1);
 ' 2> "$migration_err" \

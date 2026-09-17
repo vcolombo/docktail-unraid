@@ -44,6 +44,15 @@ final class Config
     // other, so one number is one behaviour to reason about.
     public const LOCK_WAIT = 5;
 
+    /**
+     * Seconds after which a staged file is treated as abandoned rather than in
+     * progress. Staging is a create and a write of a few hundred bytes, so
+     * this is orders of magnitude beyond any live one - it exists because the
+     * lock fails open, which means a save really can be staging while the boot
+     * migration holds the lock.
+     */
+    public const TEMP_ABANDONED_AFTER = 900;
+
     /** @var list<string> */
     public const SECRET_KEYS = [
         'TAILSCALE_OAUTH_CLIENT_ID',
@@ -153,34 +162,22 @@ final class Config
 
     /**
      * The values rc.docktail would export from this file, and only those: a
-     * line it skips is a line the service does not act on, so showing it on
-     * the settings page would describe a configuration that is not running.
+     * line it skips - or a key it does not recognise, which it refuses in
+     * config_key_is_known() - is a line the service does not act on, so
+     * showing it on the settings page would describe a configuration that is
+     * not running.
+     *
+     * The migration uses parseAsReader() directly instead, because it has to
+     * report the keys nothing reads before it removes them.
      *
      * @return array<string, string>
      */
     private static function readAsService(string $file): array
     {
-        return self::parseAsReader($file)['values'];
-    }
-
-    /**
-     * Parsed values, or null when the file exists but PHP cannot parse it.
-     *
-     * Callers that only want values use readFile(); the migration needs the
-     * distinction, because a file that fails to parse is not the same as an
-     * empty one or one holding nothing but comments - only the first means the
-     * settings page and the service disagree about what is configured.
-     *
-     * @return array<string, string>|null
-     */
-    private static function parseFile(string $file): ?array
-    {
-        if ( ! is_file($file)) {
-            return [];
-        }
-        $parsed = @parse_ini_file($file);
-
-        return is_array($parsed) ? array_map('strval', $parsed) : null;
+        return array_intersect_key(
+            self::parseAsReader($file)['values'],
+            array_flip(self::KNOWN_KEYS)
+        );
     }
 
     /**
@@ -551,13 +548,15 @@ final class Config
                     ? self::parseAsReader($file)
                     : ['values' => [], 'malformed' => [], 'nul' => false];
 
-                // Reported, not rewritten: a file PHP cannot parse - or one
-                // holding a NUL, which neither reader will take - is one the
-                // settings page shows as defaults while the service uses
-                // whatever it can read, and guessing at it is how a credential
-                // gets lost. An empty or comments-only file parses fine and is
-                // simply left alone.
-                if (is_file($file) && (self::parseFile($file) === null || $read['nul'])) {
+                // Reported and left alone: a file holding a NUL is the one
+                // file neither reader will take a line from, so there is
+                // nothing to normalise and a rewrite would drop bytes nobody
+                // has seen. Everything else is readable - a stray line is
+                // reported as malformed and removed by the pass below - which
+                // is why there is no longer a separate "PHP cannot parse it"
+                // category: since read() uses this same reader, that
+                // distinction described nothing.
+                if ($read['nul']) {
                     $report['unparseable'][] = $file;
                     $state[$file]            = ['values' => [], 'malformed' => [], 'usable' => false];
 
@@ -765,43 +764,58 @@ final class Config
     }
 
     /**
-     * Does this file hold a credential, as the service's own reader sees it?
+     * Does this file hold a credential?
      *
-     * Asked of files PHP cannot parse, so it goes through the reader rather
-     * than parse_ini_file(): a file with one malformed line still hands the
-     * daemon every valid line around it, including a secret.
+     * Asked of the file the readers have refused, so it cannot go through
+     * parseAsReader() - that returns nothing for a file holding a NUL, which
+     * would answer "no secret here" about a file whose first line is an API
+     * key. It reads the bytes and looks for the assignment, deliberately
+     * loosely: this decides whether to tighten a mode, where a false positive
+     * costs nothing and a false negative leaves a credential readable.
      */
     private static function holdsSecret(string $file): bool
     {
-        $values = self::parseAsReader($file)['values'];
-        foreach (self::SECRET_KEYS as $key) {
-            if (($values[$key] ?? '') !== '') {
-                return true;
-            }
+        $body = (string) @file_get_contents($file);
+        if ($body === '') {
+            return false;
         }
 
-        return false;
+        $keys = implode('|', array_map('preg_quote', self::SECRET_KEYS));
+
+        // A non-empty value: KEY="" is the settings page's way of storing a
+        // field somebody cleared.
+        return preg_match('/^(?:' . $keys . ')="[^"\r\n]/m', $body) === 1;
     }
 
     /**
      * Remove staged files nobody is going to commit.
      *
-     * A temp is named per pid and per call, so one left behind is one whose
-     * writer died between staging and committing - nothing will ever pick it
-     * up again. Run from the migration, which holds the lock at boot.
+     * By age, not by name. The pid in the name says nothing about liveness,
+     * and holding the lock is not proof that no writer is staging: write()
+     * fails open after its own bounded wait, so a save that timed out on an
+     * earlier holder can be mid-stage while this runs. Staging is two syscalls
+     * on a file of a few hundred bytes, so anything untouched for a quarter of
+     * an hour is abandoned; anything newer is left for the next boot.
+     *
+     * `<file>.tmp` is swept the same way: versions of this plugin before the
+     * pid suffix staged there, and a credentials write that failed under one of
+     * them left the whole secret in `credentials.cfg.tmp`, which nothing reads
+     * and nothing else would remove.
      *
      * @param list<string> $files the destinations whose temps to sweep
      */
     private static function sweepAbandonedTemps(array $files): void
     {
+        $cutoff = time() - self::TEMP_ABANDONED_AFTER;
+
         foreach ($files as $file) {
-            // `<file>.tmp` as well as the per-pid names: versions of this
-            // plugin before the pid suffix staged there, and a credentials
-            // write that failed under one of them left the whole secret in
-            // `credentials.cfg.tmp` at whatever mode it had. Nothing reads it
-            // and nothing else would ever remove it.
             foreach (array_merge([$file . '.tmp'], glob($file . '.tmp.*') ?: []) as $stale) {
-                if (is_file($stale)) {
+                if ( ! is_file($stale)) {
+                    continue;
+                }
+
+                $touched = @filemtime($stale);
+                if ($touched !== false && $touched < $cutoff) {
                     @unlink($stale);
                 }
             }
