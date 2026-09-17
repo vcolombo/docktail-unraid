@@ -164,6 +164,90 @@ final class Config
     }
 
     /**
+     * The file as rc.docktail's reader sees it, which is not what
+     * parse_ini_file() sees: PHP accepts `ENABLE_DOCKTAIL=1` unquoted and
+     * lowercase keys, the reader accepts neither. The migration has to use
+     * this stricter view, because renderBody() would otherwise canonicalise a
+     * line that currently does nothing into one the reader obeys - an
+     * unquoted `ENABLE_DOCKTAIL=1` would start the daemon on the next boot.
+     *
+     * Mirrors read_config() and unescape_value() in rc.docktail: KEY="value"
+     * with `\\`, `\"` and `\$` unescaped, an unescaped quote or a dangling
+     * backslash rejected.
+     *
+     * @return array{values: array<string, string>, rejected: list<string>}
+     */
+    private static function parseAsReader(string $file): array
+    {
+        $values   = [];
+        $rejected = [];
+
+        foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            $line = rtrim($line, "\r");
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if (preg_match('/^([A-Z][A-Z0-9_]*)="(.*)"$/', $line, $m) !== 1) {
+                $rejected[] = self::lineLabel($line);
+                continue;
+            }
+
+            $value = self::unescapeValue($m[2]);
+            if ($value === null) {
+                $rejected[] = $m[1];
+                continue;
+            }
+
+            $values[$m[1]] = $value;
+        }
+
+        return ['values' => $values, 'rejected' => $rejected];
+    }
+
+    /**
+     * Undo renderBody()'s escaping, or null when the value could not have come
+     * from it - an unescaped quote means the closing quote was not where the
+     * line said it was, and a dangling backslash means PHP's parser and the
+     * reader would disagree about where the value ends.
+     */
+    private static function unescapeValue(string $value): ?string
+    {
+        $out    = '';
+        $length = strlen($value);
+
+        for ($i = 0; $i < $length; $i++) {
+            $char = $value[$i];
+
+            if ($char === '\\') {
+                if ($i + 1 >= $length) {
+                    return null;
+                }
+                $next = $value[$i + 1];
+                if ($next === '\\' || $next === '"' || $next === '$') {
+                    $out .= $next;
+                    $i++;
+                    continue;
+                }
+            } elseif ($char === '"') {
+                return null;
+            }
+
+            $out .= $char;
+        }
+
+        return $out;
+    }
+
+    /** A line named for a log message, without spilling a credential into it. */
+    private static function lineLabel(string $line): string
+    {
+        return preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\s*=/', $line, $m) === 1
+            ? $m[1]
+            : 'an unrecognised line';
+    }
+
+    /**
      * Persist both files. Written to a temporary file and renamed, so a
      * concurrent rc.docktail read never sees a half-written config.
      *
@@ -278,30 +362,33 @@ final class Config
             $unparseable = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
-                $values = self::parseFile($file);
-                if ($values === null) {
-                    // A file PHP cannot parse is one the settings page will
-                    // show as defaults while rc.docktail's line reader still
-                    // uses whatever lines are valid, so the two disagree about
-                    // what is configured. Not rewritten blind - guessing at a
-                    // file PHP cannot read is how a credential gets lost - so
-                    // it is named instead. A file that is empty or holds only
-                    // comments parses fine and is simply left alone.
+                if ( ! is_file($file)) {
+                    continue;
+                }
+
+                // Reported, not rewritten: a file PHP cannot parse is one the
+                // settings page shows as defaults while the service still uses
+                // whatever lines are valid, and guessing at it is how a
+                // credential gets lost. An empty or comments-only file parses
+                // fine and is simply left alone.
+                if (self::parseFile($file) === null) {
                     $unparseable[] = $file;
                     continue;
                 }
 
-                if ($values === []) {
+                $read   = self::parseAsReader($file);
+                $values = $read['values'];
+                if ($values === [] && $read['rejected'] === []) {
                     continue;
                 }
 
                 $lost    = [];
-                $unknown = [];
+                $unknown = $read['rejected'];
                 foreach ($values as $key => $value) {
-                    // renderBody() would uppercase and strip this key, which
-                    // turns a line rc.docktail ignores into one it obeys.
-                    // Removing it is the only rewrite that changes nothing
-                    // about what DockTail runs with.
+                    // Only keys the reader obeys survive the rewrite. Anything
+                    // else - an unknown name, or a line the reader skips -
+                    // would be canonicalised by renderBody() into something it
+                    // does obey, which is a config change nobody asked for.
                     if ( ! in_array($key, self::KNOWN_KEYS, true)) {
                         $unknown[] = $key;
                         unset($values[$key]);
@@ -527,12 +614,33 @@ final class Config
     {
         $refused = [];
         foreach (self::REFUSABLE_FIELDS as $key => $label) {
-            if (self::containsUnstorable(trim((string) ($post[$key] ?? '')))) {
+            $raw = trim((string) ($post[$key] ?? ''));
+
+            // A list is judged per entry, because that is how normalizeList()
+            // treats it: `tag:a,\ntag:b` loses nothing once each entry is
+            // trimmed, so reporting a refusal there would name a field whose
+            // value was stored whole.
+            $unstorable = in_array($key, self::LIST_SETTINGS, true)
+                ? self::listHasUnstorableEntry($raw)
+                : self::containsUnstorable($raw);
+
+            if ($unstorable) {
                 $refused[] = $label;
             }
         }
 
         return $refused;
+    }
+
+    private static function listHasUnstorableEntry(string $value): bool
+    {
+        foreach (array_map('trim', explode(',', $value)) as $entry) {
+            if ($entry !== '' && self::containsUnstorable($entry)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function normalizeList(string $value): string
