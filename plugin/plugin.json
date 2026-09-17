@@ -5,5 +5,5 @@
   "min": "7.0.0",
   "support": "https://github.com/vcolombo/docktail-unraid/issues",
   "launch": "Settings/DockTail",
-  "docktailVersion": "1.7.9"
+  "docktailVersion": "1.8.0"
 }
