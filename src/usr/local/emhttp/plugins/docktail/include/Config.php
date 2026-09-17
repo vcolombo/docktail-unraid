@@ -175,34 +175,44 @@ final class Config
      * with `\\`, `\"` and `\$` unescaped, an unescaped quote or a dangling
      * backslash rejected.
      *
-     * @return array{values: array<string, string>, rejected: list<string>}
+     * @return array{values: array<string, string>, malformed: list<string>}
+     *         malformed names lines the reader would skip on syntax alone -
+     *         kept apart from keys it reads but does not recognise, because
+     *         the two need different things said about them
      */
     private static function parseAsReader(string $file): array
     {
-        $values   = [];
-        $rejected = [];
+        $values    = [];
+        $malformed = [];
 
-        foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
-            $line = rtrim($line, "\r");
+        // Split on \n by hand: file() with FILE_IGNORE_NEW_LINES strips a
+        // whole \r\n, where `read -r` keeps the \r and the reader then drops
+        // exactly one. Getting that wrong accepts KEY="1"\r\r - a line the
+        // service skips - and promotes it.
+        foreach (explode("\n", (string) @file_get_contents($file)) as $line) {
+            if (str_ends_with($line, "\r")) {
+                $line = substr($line, 0, -1);
+            }
+
             if ($line === '' || str_starts_with($line, '#')) {
                 continue;
             }
 
             if (preg_match('/^([A-Z][A-Z0-9_]*)="(.*)"$/', $line, $m) !== 1) {
-                $rejected[] = self::lineLabel($line);
+                $malformed[] = self::lineLabel($line);
                 continue;
             }
 
             $value = self::unescapeValue($m[2]);
             if ($value === null) {
-                $rejected[] = $m[1];
+                $malformed[] = $m[1];
                 continue;
             }
 
             $values[$m[1]] = $value;
         }
 
-        return ['values' => $values, 'rejected' => $rejected];
+        return ['values' => $values, 'malformed' => $malformed];
     }
 
     /**
@@ -347,11 +357,11 @@ final class Config
      * time, forever.
      *
      * @return array{ok: bool, dropped: list<string>, ignored: list<string>,
-     *         unparseable: list<string>} ok is false only when a file that
-     *         needed converting could not be written; dropped names the fields
-     *         whose value did not survive; ignored names keys removed because
-     *         nothing reads them; unparseable names files left alone because
-     *         PHP could not parse them at all
+     *         malformed: list<string>, unparseable: list<string>} ok is false
+     *         only when a file that needed converting could not be written;
+     *         dropped names fields whose value did not survive; ignored names
+     *         keys nothing reads; malformed names lines the service skips on
+     *         syntax alone; unparseable names files PHP could not parse at all
      */
     public static function normalizeStoredFiles(): array
     {
@@ -359,6 +369,7 @@ final class Config
             $ok          = true;
             $dropped     = [];
             $ignored     = [];
+            $malformed   = [];
             $unparseable = [];
 
             foreach ([self::SETTINGS_FILE => 0644, self::CREDENTIALS_FILE => 0600] as $file => $mode) {
@@ -378,12 +389,13 @@ final class Config
 
                 $read   = self::parseAsReader($file);
                 $values = $read['values'];
-                if ($values === [] && $read['rejected'] === []) {
+                if ($values === [] && $read['malformed'] === []) {
                     continue;
                 }
 
                 $lost    = [];
-                $unknown = $read['rejected'];
+                $unknown = [];
+                $broken  = $read['malformed'];
                 foreach ($values as $key => $value) {
                     // Only keys the reader obeys survive the rewrite. Anything
                     // else - an unknown name, or a line the reader skips -
@@ -426,14 +438,16 @@ final class Config
                     continue;
                 }
 
-                $dropped = array_merge($dropped, $lost);
-                $ignored = array_merge($ignored, $unknown);
+                $dropped   = array_merge($dropped, $lost);
+                $ignored   = array_merge($ignored, $unknown);
+                $malformed = array_merge($malformed, $broken);
             }
 
             return [
                 'ok'          => $ok,
                 'dropped'     => $dropped,
                 'ignored'     => $ignored,
+                'malformed'   => $malformed,
                 'unparseable' => $unparseable,
             ];
         });

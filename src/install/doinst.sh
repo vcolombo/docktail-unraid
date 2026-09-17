@@ -22,6 +22,9 @@ php -r '
   foreach ($r["ignored"] as $key) {
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";
   }
+  foreach ($r["malformed"] as $key) {
+      echo "docktail: removed $key from the stored config - the line was not valid KEY=\"value\", so the service was already skipping it\n";
+  }
   foreach ($r["unparseable"] as $file) {
       echo "docktail: left $file alone - PHP cannot parse it, so the settings page shows defaults while the service still reads whatever lines are valid. Repair the file (keep a copy first); pressing Apply would save the defaults over what is running.\n";
   }
