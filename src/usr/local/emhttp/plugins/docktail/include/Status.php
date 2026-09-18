@@ -479,7 +479,8 @@ final class Status
     <strong>Start</strong> and <strong>Restart</strong> honour the <em>Enable DockTail</em>
     setting: neither starts anything while it is set to No.
     <strong>Stop</strong> waits for DockTail to withdraw every Service it advertises before
-    returning, which can take up to 35 seconds &mdash; killing it sooner would leave Services
+    returning, which can take up to 35 seconds &mdash; longer if it has to wait for a start or
+    stop that is already running &mdash; and killing it sooner would leave Services
     advertised on the tailnet with nothing behind them.
     <strong>Refresh</strong> only re-reads this page; it does not touch the service.
 </blockquote>
@@ -747,7 +748,8 @@ function docktailCheck(button) {
 
 /*
  * Submitted over AJAX rather than into the hidden progressFrame. A stop waits
- * up to 35 seconds for DockTail to withdraw its Services, and posting into a
+ * up to 35 seconds for DockTail to withdraw its Services - and before that, up
+ * to RC_LOCK_WAIT for any start or stop already in flight - and posting into a
  * frame nobody can see made that indistinguishable from a dead button.
  */
 function docktailControl(action) {
@@ -763,8 +765,8 @@ function docktailControl(action) {
 
     var progress = {
         start: 'Starting DockTail...',
-        stop: 'Stopping DockTail - waiting for it to withdraw its Services, up to 35 seconds...',
-        restart: 'Restarting DockTail - the stop waits for Services to withdraw, up to 35 seconds...'
+        stop: 'Stopping DockTail - waiting for it to withdraw its Services. Up to 35 seconds, longer if another start or stop is still finishing...',
+        restart: 'Restarting DockTail - the stop waits for Services to withdraw. Up to 35 seconds, longer if another start or stop is still finishing...'
     };
 
     note.removeClass('docktail-apply-error').text(progress[action] || 'Working...');

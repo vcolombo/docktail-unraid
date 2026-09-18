@@ -74,4 +74,11 @@ php -d display_errors=stderr -r '
     done < "$migration_err"
   }
 
-[ "$migration_err" = /dev/null ] || rm -f "$migration_err"
+# Last command in the script, so its status is the install's status: the
+# fallback path - mktemp unavailable, so $migration_err is /dev/null - must not
+# read as a failed install, and neither must a temp file that cannot be removed.
+if [ "$migration_err" != /dev/null ]; then
+  rm -f "$migration_err"
+fi
+
+exit 0

@@ -366,13 +366,36 @@ final class Config
         return self::withLock(static fn (): string => self::revisionOfStored(), LOCK_SH);
     }
 
-    /** The same thing, for callers that already hold the lock. */
+    /**
+     * The same thing, for callers that already hold the lock.
+     *
+     * '' when any file that exists cannot be read: the fence's whole job is to
+     * notice that what the form was built from has changed, and a file nobody
+     * can read has unknown content - two different unknowns would hash the
+     * same, so a form rendered over one would pass the fence after the other.
+     * An empty revision is refused by apply.php with the reload message.
+     *
+     * default.cfg is in it because the form shows those values: a plugin
+     * update that replaces the shipped defaults has to make an open form
+     * stale, or Apply would write the old ones back into docktail.cfg and
+     * mask the new ones.
+     */
     private static function revisionOfStored(): string
     {
         $parts = [];
-        foreach ([self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
-            $body    = @file_get_contents($file);
-            $parts[] = $body === false ? '-' : hash('sha256', $body);
+        foreach ([PLUGIN_ROOT . '/default.cfg', self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
+            $body = @file_get_contents($file);
+            if ($body === false) {
+                if (is_file($file)) {
+                    return '';
+                }
+
+                // Absent is a state, and a different one from unreadable.
+                $parts[] = 'absent';
+                continue;
+            }
+
+            $parts[] = hash('sha256', $body);
         }
 
         return substr(hash('sha256', implode('.', $parts)), 0, 16);
@@ -703,8 +726,17 @@ final class Config
                     // reader could use a line of it - and the person has the
                     // file to repair.
                     if ($file === self::SETTINGS_FILE) {
-                        $aside = sprintf('%s.unreadable.%s', $file, date('Ymd-His'));
-                        if (@rename($file, $aside)) {
+                        // Timestamp for a person, random suffix so two
+                        // installs in the same second - or two migrations at
+                        // once - cannot have one replace the other's repair
+                        // copy.
+                        $aside = sprintf(
+                            '%s.unreadable.%s.%s',
+                            $file,
+                            date('Ymd-His'),
+                            bin2hex(random_bytes(3))
+                        );
+                        if ( ! file_exists($aside) && @rename($file, $aside)) {
                             // Reported as quarantined only if it is actually
                             // private now: the aside keeps the mode it had, so
                             // a failed chmod leaves the credential readable
