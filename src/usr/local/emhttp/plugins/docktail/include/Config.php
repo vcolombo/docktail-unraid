@@ -1112,7 +1112,11 @@ final class Config
         $protected = $report['protected'];
         $exposed   = $report['exposed'];
 
-        if ($unremoved !== [] && self::holdsSecret(self::SETTINGS_FILE)) {
+        // Whatever the report said: a duplicate that lost precedence, or a
+        // line the reader rejected, leaves a credential in that file too, and
+        // the categories those produce are not in $unremoved. The file is what
+        // matters here, not which decision put the secret in it.
+        if (self::holdsSecret(self::SETTINGS_FILE)) {
             if (@chmod(self::SETTINGS_FILE, 0600)) {
                 $protected[] = self::SETTINGS_FILE;
             } else {
@@ -1925,7 +1929,11 @@ function docktailApply() {
                 // it matches what is stored and there is nothing to save, so
                 // it is clean. Otherwise its Apply has to be put back, because
                 // this request greyed it: the render saw a request in flight.
-                if (revision && ! state.dirty && $('#docktail_revision').val() === revision) {
+                // Not when something was refused: that answer carries a value
+                // the person still has to correct, and greying Apply over it
+                // would hide the only thing they can act on.
+                if (revision && ! refused && ! state.dirty
+                    && $('#docktail_revision').val() === revision) {
                     state.clean = true;
                     live.apply.prop('disabled', true);
 

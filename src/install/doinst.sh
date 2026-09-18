@@ -64,7 +64,9 @@ php -d display_errors=stderr -r '
   exit($r["ok"] ? 0 : 1);
 ' 2> "$migration_err" \
   || {
-    echo "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail reads it either way, but PHP's reader and the shell reader only agree on the escaped form until an Apply rewrites it"
+    # Its own line: the php diagnostics below are appended after it, and
+    # without this they run into the end of this sentence.
+    printf '%s\n' "docktail: could not rewrite a legacy config in /boot/config/plugins/docktail; DockTail reads it either way, but PHP's reader and the shell reader only agree on the escaped form until an Apply rewrites it"
     # And why, which the line above cannot say: a missing php, a parse error
     # and a broken include path all land here and look identical without it.
     # A non-zero exit with nothing on stderr is the ordinary case - a file
