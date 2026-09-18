@@ -274,7 +274,10 @@ start_docktail() {
 
     if pid_is_docktail "$adopted"; then
       log "The in-flight start as pid $adopted never came up; stopping it before starting again."
-      kill -TERM "$adopted" 2> /dev/null
+      # Rechecked after the log line, not before it: the pid can exit in the
+      # gap and be handed to something else, and an unchecked TERM is the same
+      # mistake as an unchecked KILL.
+      pid_is_docktail "$adopted" && kill -TERM "$adopted" 2> /dev/null
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$adopted"; do
         sleep 1
@@ -331,15 +334,15 @@ start_docktail() {
     # about to release the lifecycle lock, the next start does not consult the
     # pidfile, and a child that becomes visible afterwards is a second daemon
     # nothing is tracking. So it is stopped here, while the lock is still held.
-    if kill -0 "$started" 2> /dev/null; then
+    if pid_is_docktail "$started"; then
       log "DockTail was launched as pid $started and has not started within ${START_VISIBLE_TIMEOUT}s; stopping it rather than leaving it to come up untracked."
-      kill -TERM "$started" 2> /dev/null
+      pid_is_docktail "$started" && kill -TERM "$started" 2> /dev/null
       local settle=0
-      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && kill -0 "$started" 2> /dev/null; do
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$started"; do
         sleep 1
         settle=$((settle + 1))
       done
-      kill -KILL "$started" 2> /dev/null
+      pid_is_docktail "$started" && kill -KILL "$started" 2> /dev/null
     else
       log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
     fi
@@ -396,7 +399,7 @@ stop_docktail() {
     # handed to something else before the SIGKILL lands.
     if pid_is_docktail "$recorded"; then
       log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
-      kill -TERM "$recorded" 2> /dev/null
+      pid_is_docktail "$recorded" && kill -TERM "$recorded" 2> /dev/null
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$recorded"; do
         sleep 1

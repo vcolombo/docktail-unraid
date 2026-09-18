@@ -60,8 +60,6 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
-
 mkdir -p /boot/config/plugins/docktail
 
 # Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
@@ -69,7 +67,13 @@ mkdir -p /boot/config/plugins/docktail
 # one: a save renames a staged file into place, a worker that dies between the
 # two leaves that file behind, and the migration stages docktail.cfg from a
 # state where it may still hold a credential it is about to move out.
+#
+# Before upgradepkg, not after: the package's doinst.sh runs the config
+# migration, which stages those temps - so the patterns have to be on the flash
+# before anything can write one.
 printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n' > /boot/config/plugins/docktail/.gitignore
+
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
 
 if [ ! -f "/boot/config/plugins/docktail/credentials.cfg" ]; then
     install -m 0600 /dev/null /boot/config/plugins/docktail/credentials.cfg

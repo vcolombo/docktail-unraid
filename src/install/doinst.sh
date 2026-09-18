@@ -34,6 +34,9 @@ php -d display_errors=stderr -r '
   foreach ($r["stranded"] as $field) {
       echo "docktail: removed the stored $field from docktail.cfg - it belongs in credentials.cfg, which cannot be read, and docktail.cfg is part of the Unraid Connect flash backup. Repair credentials.cfg, then enter the value again on the DockTail settings page.\n";
   }
+  foreach ($r["unremoved"] as $field) {
+      echo "docktail: the stored $field is still in docktail.cfg and should not be - it belongs in credentials.cfg, which cannot be read, and docktail.cfg is part of the Unraid Connect flash backup. This attempt to remove it failed. Repair credentials.cfg and press Apply.\n";
+  }
   foreach ($r["moved"] as $field) {
       echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }

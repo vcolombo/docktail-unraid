@@ -45,8 +45,6 @@ if [ -d "{{ pluginDirectory }}" ]; then
     rm -rf {{ pluginDirectory }}
 fi
 
-upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
-
 mkdir -p {{ configDirectory }}
 
 # Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
@@ -54,7 +52,13 @@ mkdir -p {{ configDirectory }}
 # one: a save renames a staged file into place, a worker that dies between the
 # two leaves that file behind, and the migration stages docktail.cfg from a
 # state where it may still hold a credential it is about to move out.
+#
+# Before upgradepkg, not after: the package's doinst.sh runs the config
+# migration, which stages those temps - so the patterns have to be on the flash
+# before anything can write one.
 printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n' > {{ configDirectory }}/.gitignore
+
+upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
 
 if [ ! -f "{{ configDirectory }}/credentials.cfg" ]; then
     install -m 0600 /dev/null {{ configDirectory }}/credentials.cfg

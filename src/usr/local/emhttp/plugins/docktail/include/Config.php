@@ -578,7 +578,7 @@ final class Config
      * different things of whoever reads the boot log.
      *
      * @return array{ok: bool, dropped: list<string>, superseded: list<string>,
-     *         stranded: list<string>, moved: list<string>,
+     *         stranded: list<string>, unremoved: list<string>, moved: list<string>,
      *         protected: list<string>, exposed: list<string>,
      *         ignored: list<string>, malformed: list<string>,
      *         unparseable: list<string>}
@@ -607,6 +607,7 @@ final class Config
                 'dropped'     => [],
                 'superseded'  => [],
                 'stranded'    => [],
+                'unremoved'   => [],
                 'moved'       => [],
                 'protected'   => [],
                 'exposed'     => [],
@@ -921,12 +922,18 @@ final class Config
         // saying a credential was moved while it is still sitting where it was
         // would be worse than saying nothing. What did happen regardless of
         // the write - a mode tightened, a credential left exposed, a file that
-        // cannot be parsed - is kept, because those are true either way.
+        // cannot be read - is kept, because those are true either way.
+        //
+        // A stranded secret becomes its own outcome here. The successful path
+        // removes it from docktail.cfg; when the write fails it is still in
+        // there, in a file the flash backup includes, so reporting it as
+        // removed would be exactly backwards.
         return [
             'ok'          => false,
             'dropped'     => [],
             'superseded'  => [],
-            'stranded'    => $report['stranded'],
+            'stranded'    => [],
+            'unremoved'   => $report['stranded'],
             'moved'       => [],
             'protected'   => $report['protected'],
             'exposed'     => $report['exposed'],
