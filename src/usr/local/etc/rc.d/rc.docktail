@@ -33,11 +33,22 @@ STOP_TIMEOUT=35
 # which is set the moment it execs.
 START_VISIBLE_TIMEOUT=5
 
-# argv[0] of the shell that writes the pidfile and then exec's DockTail. It is
-# how a process that has not exec'd yet can be identified as ours: an argv
-# element that happens to be the binary's path proves nothing - a `grep` has
-# one - but this string is in nothing else on the system.
+# argv[0] of the shell that writes the pidfile and then exec's DockTail, and
+# the prefix of the token that identifies one particular launch.
+#
+# A fixed string was not enough: `pkill -f` would match anything whose command
+# line contains it, so a coincidence - or an argv somebody chose - could have
+# been signalled instead. Each launch therefore gets random bytes appended,
+# written into the pidfile beside the pid, and the stop matches on that.
 LAUNCH_MARKER="docktail-launcher"
+
+# launch_token - a marker nothing else can be carrying.
+launch_token() {
+  local bytes
+  bytes=$(od -An -tx1 -N8 /dev/urandom 2> /dev/null | tr -d ' \n')
+  [ -n "$bytes" ] || bytes="$$-$(date +%s)"
+  echo "${LAUNCH_MARKER}-${bytes}"
+}
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
@@ -259,8 +270,8 @@ start_docktail() {
   # child does, however the launching shell died. is_running() cannot see those:
   # the process is still the launcher shell. Launching a second one here is how
   # two daemons end up reconciling the same tailnet, so this waits for it.
-  local adopted
-  adopted=$(cat "$PIDFILE" 2> /dev/null)
+  local adopted adopted_token
+  read -r adopted adopted_token < "$PIDFILE" 2> /dev/null || true
   if pid_is_docktail "$adopted"; then
     log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
 
@@ -282,13 +293,13 @@ start_docktail() {
       # Rechecked after the log line, not before it: the pid can exit in the
       # gap and be handed to something else, and an unchecked TERM is the same
       # mistake as an unchecked KILL.
-      pid_is_docktail "$adopted" && signal_launcher TERM
+      pid_is_docktail "$adopted" && signal_launcher TERM "$adopted_token"
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$adopted"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$adopted" && signal_launcher KILL
+      pid_is_docktail "$adopted" && signal_launcher KILL "$adopted_token"
 
       # It can exec during that wait - slowly, but it got there. Then the
       # marker is gone, so signal_launcher matched nothing, and what is on the
@@ -345,8 +356,11 @@ start_docktail() {
   # second daemon, and by the time it gets the lock the pidfile exists. The
   # daemon itself must not hold either descriptor, so the child drops both in
   # the same breath as its exec.
-  nohup bash -c 'echo $$ > "$2"; exec 8>&- 9>&-; exec "$1"' \
-    "$LAUNCH_MARKER" "$BIN" "$PIDFILE" >> "$LOG" 2>&1 &
+  local token launch_token_of_started
+  token=$(launch_token)
+  launch_token_of_started="$token"
+  nohup bash -c 'echo "$$ $0" > "$2"; exec 8>&- 9>&-; exec "$1"' \
+    "$token" "$BIN" "$PIDFILE" >> "$LOG" 2>&1 &
   started=$!
 
   # Held until the daemon is visible to is_running(), because the lock is only
@@ -371,13 +385,13 @@ start_docktail() {
     # nothing is tracking. So it is stopped here, while the lock is still held.
     if pid_is_docktail "$started"; then
       log "DockTail was launched as pid $started and has not started within ${START_VISIBLE_TIMEOUT}s; stopping it rather than leaving it to come up untracked."
-      signal_launcher TERM
+      signal_launcher TERM "$launch_token_of_started"
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$started"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$started" && signal_launcher KILL
+      pid_is_docktail "$started" && signal_launcher KILL "$launch_token_of_started"
 
       # And by its own name, in case it exec'd during the wait: the marker
       # lives in the launcher's argv and is gone the moment DockTail replaces
@@ -471,8 +485,9 @@ pid_is_docktail() {
 # the number cannot be bound to the identity here; what can be done is to stop
 # using the number for the signal at all.
 #
-# pkill matches and signals in one process, on $LAUNCH_MARKER, which exists in
-# the argv of our launcher and nothing else. A reused pid cannot be hit by it:
+# pkill matches and signals in one process, on the launch token, which exists
+# in the argv of one launcher and nothing else - it is random per launch, so a
+# coincidence cannot carry it and nobody can arrange to be signalled instead. A reused pid cannot be hit by it:
 # to be matched, a process would have to carry the marker, which only this
 # script's launcher does. The pid is still used to decide *whether* to act and
 # to wait for the outcome - both harmless if it has been reused, because the
@@ -481,7 +496,17 @@ pid_is_docktail() {
 # The lifecycle lock is held in every path that calls this, so the only
 # launcher this can match is the one being stopped.
 signal_launcher() {
-  "$PKILL" --ns $$ --euid root "-$1" -f "$LAUNCH_MARKER" 2> /dev/null
+  local signal="$1" token="$2"
+
+  # Nothing to match on means nothing to signal: a pidfile from a version
+  # before the token, or a truncated one. The anchored pkill on the binary's
+  # own name is what covers those, in the callers.
+  case "$token" in
+  "${LAUNCH_MARKER}-"*) ;;
+  *) return 0 ;;
+  esac
+
+  "$PKILL" --ns $$ --euid root "-$signal" -f "$token" 2> /dev/null
   return 0
 }
 
@@ -492,9 +517,9 @@ stop_docktail() {
   # written before the wait, so it can still be found - and killing it here is
   # the difference between a stop that worked and a daemon that comes up behind
   # it with nothing tracking it.
-  local recorded=""
+  local recorded="" recorded_token=""
   if [ -f "$PIDFILE" ]; then
-    recorded=$(cat "$PIDFILE" 2> /dev/null)
+    read -r recorded recorded_token < "$PIDFILE" 2> /dev/null || true
   fi
 
   if ! is_running; then
@@ -503,24 +528,30 @@ stop_docktail() {
     # handed to something else before the SIGKILL lands.
     if pid_is_docktail "$recorded"; then
       log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
-      pid_is_docktail "$recorded" && signal_launcher TERM
+      pid_is_docktail "$recorded" && signal_launcher TERM "$recorded_token"
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$recorded"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$recorded" && signal_launcher KILL
+      pid_is_docktail "$recorded" && signal_launcher KILL "$recorded_token"
     else
       log "DockTail is not running."
     fi
 
-    rm -f "$PIDFILE"
+    # It can exec while that is happening, and then the token matches nothing:
+    # what is on the end of that pid is a running daemon. Returning here would
+    # leave it - with its Tailscale Services advertised - which during a Docker
+    # shutdown is the failure this script exists to avoid. So this falls
+    # through to the ordinary stop below, which TERMs the binary by its own
+    # name, waits out the drain and KILLs if it has to.
+    if ! is_running; then
+      rm -f "$PIDFILE"
 
-    # Whatever was launched may still have exec'd in the window above; the
-    # pattern kill below is what catches it.
-    "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+      return 0
+    fi
 
-    return 0
+    log "DockTail became visible while it was being stopped; draining it properly."
   fi
 
   log "Stopping DockTail, waiting up to ${STOP_TIMEOUT}s for service cleanup."
