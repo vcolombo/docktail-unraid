@@ -567,27 +567,43 @@ stop_docktail() {
       log "DockTail is not running."
     fi
 
-    # It can exec while that is happening, and then the token matches nothing:
-    # what is on the end of that pid is a running daemon. Returning here would
-    # leave it - with its Tailscale Services advertised - which during a Docker
-    # shutdown is the failure this script exists to avoid. So this falls
-    # through to the ordinary stop below, which TERMs the binary by its own
-    # name, waits out the drain and KILLs if it has to.
-    if ! is_running; then
+    # Two ways the work above can leave something behind, so what matters here
+    # is whether anything is still there - by identity as well as by
+    # visibility, because those two do not answer the same question.
+    #
+    # It can exec while the settle loop runs, and then the token matches
+    # nothing and what is on the end of that pid is a running daemon. Or the
+    # token was never there to match: a pidfile from a version before it,
+    # where the signals above were no-ops and the process is exactly as alive
+    # as it was. is_running() sees neither case if $BIN is a script, because
+    # it asks for the anchored form deliberately.
+    #
+    # Returning here would leave a daemon with its Tailscale Services
+    # advertised, which during a Docker shutdown is the failure this script
+    # exists to avoid. So anything still recognisable falls through to the
+    # ordinary stop, whose kills match every shape pid_is_docktail accepts.
+    if ! is_running && ! pid_is_docktail "$recorded"; then
       rm -f "$PIDFILE"
 
       return 0
     fi
 
-    log "DockTail became visible while it was being stopped; draining it properly."
+    if is_running; then
+      log "DockTail became visible while it was being stopped; draining it properly."
+    else
+      log "Pid $recorded is still DockTail and the pidfile carried no launch token; stopping it by what it is running."
+    fi
   fi
 
   log "Stopping DockTail, waiting up to ${STOP_TIMEOUT}s for service cleanup."
   "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
 
+  # The same two questions as above: a script-shaped daemon is never visible
+  # to is_running(), so waiting on that alone would call it stopped while it
+  # is still there - and skip the SIGKILL the timeout exists to send.
   local waited=0
   while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
-    if ! is_running; then
+    if ! is_running && ! pid_is_docktail "$recorded"; then
       log "DockTail stopped after ${waited}s."
       rm -f "$PIDFILE"
       return 0
