@@ -549,10 +549,12 @@ final class Config
      * A secret found in docktail.cfg is moved rather than rewritten. Both
      * files are read into one config, so a hand-edited or legacy API key in
      * the settings file works - and rewriting it there would re-publish it at
-     * 0644, which is the whole reason the credentials file exists. It moves
-     * into the 0600 file if that file has nothing under the same key, and is
-     * dropped if it does: a credential the person set through the settings
-     * page is the one to keep.
+     * 0644 in a file Unraid Connect backs up, which is the whole reason the
+     * credentials file exists. It moves into the 0600 file if that file has
+     * nothing under the same key; it is dropped if it does, because a
+     * credential set through the settings page is the one to keep, and dropped
+     * if the credentials file cannot be read at all, because leaving it in a
+     * file that gets uploaded is worse than losing it.
      *
      * An unstorable value is dropped, and dropped differently from
      * coerceSecrets(), which writes every secret key and stores '' for a
@@ -583,8 +585,9 @@ final class Config
      *         ok is false only when a file that needed converting could not be
      *         written; dropped names fields whose value could not be stored;
      *         superseded names settings-file secrets that lost to a credential
-     *         already stored; stranded names ones that could not be moved
-     *         because the credentials file is unparseable; moved names secrets
+     *         already stored; stranded names ones removed because the
+     *         credentials file could not be read and the settings file is in
+     *         the flash backup; moved names secrets
      *         relocated into the 0600 file; protected names files tightened to
      *         0600 because they hold a credential and cannot be rewritten;
      *         exposed names ones where even that failed; ignored names keys
@@ -670,17 +673,13 @@ final class Config
 
             $state = self::relocateSecrets($state, $report);
 
-            // A credential that could not be moved stays in the settings file,
-            // so that file is no longer a file whose contents are public.
-            if ($report['stranded'] !== []) {
-                $modes[self::SETTINGS_FILE] = 0600;
-            }
-
             // Enforced whether or not the bytes change, and before the
             // rewrite: a file already in canonical form is never rewritten -
             // that is the flash-write saving - so this is the only thing that
             // would ever tighten a credentials file an older version left at
-            // 0644, or the settings file that just kept a stranded secret.
+            // 0644. Only the credentials file: docktail.cfg is settings, it is
+            // backed up by Unraid Connect on purpose, and nothing that belongs
+            // in the other file is left in it.
             foreach ($modes as $file => $mode) {
                 if ($mode !== 0600 || ! is_file($file) || (@fileperms($file) & 0777) === 0600) {
                     continue;
@@ -817,13 +816,15 @@ final class Config
             }
 
             if ( ! $state[self::CREDENTIALS_FILE]['usable']) {
-                // Put back: there is nowhere to move it to, and rewriting the
-                // settings file without it would delete a working credential
-                // while the log said it had been left alone. It stays, and the
-                // file it stays in is written 0600 instead of 0644 - the
-                // exposure is the mode, and both readers of it are root.
-                $state[self::SETTINGS_FILE]['values'][$key] = $value;
-                $report['stranded'][]                       = $label;
+                // Removed, not kept. Keeping it was the previous answer and it
+                // was wrong for a reason a chmod cannot fix: docktail.cfg is a
+                // settings file, so it is *not* excluded from Unraid Connect's
+                // flash backup - and the settings page promises a credential
+                // never leaves this server. A 0600 secret in a file that gets
+                // uploaded breaks that promise more quietly than losing the
+                // value does, so the value goes and the report says exactly
+                // what to do about it.
+                $report['stranded'][] = $label;
                 continue;
             }
 

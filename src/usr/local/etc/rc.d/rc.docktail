@@ -248,6 +248,42 @@ start_docktail() {
     return 0
   fi
 
+  # Not visible, but the pidfile may still name a live child of a launcher that
+  # was killed between its fork and its exec - is_running() matches $BIN, and
+  # that child is still `nohup $BIN` or a script's interpreter. Launching a
+  # second one here is how two daemons end up reconciling the same tailnet, so
+  # this waits for it: if it surfaces, that is the start somebody already
+  # asked for, and if it does not, it is stopped before this one begins.
+  local adopted
+  adopted=$(cat "$PIDFILE" 2> /dev/null)
+  if pid_is_docktail "$adopted"; then
+    log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
+
+    local watch=0
+    while [ "$watch" -lt "$((START_VISIBLE_TIMEOUT * 10))" ]; do
+      is_running && break
+      pid_is_docktail "$adopted" || break
+      sleep 0.1
+      watch=$((watch + 1))
+    done
+
+    if is_running; then
+      log "DockTail came up as pid $adopted."
+      return 0
+    fi
+
+    if pid_is_docktail "$adopted"; then
+      log "The in-flight start as pid $adopted never came up; stopping it before starting again."
+      kill -TERM "$adopted" 2> /dev/null
+      local settle=0
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$adopted"; do
+        sleep 1
+        settle=$((settle + 1))
+      done
+      pid_is_docktail "$adopted" && kill -KILL "$adopted" 2> /dev/null
+    fi
+  fi
+
   # DockTail resolves the tailscale CLI from PATH; the Tailscale plugin
   # symlinks it into /usr/local/sbin.
   export PATH="$TRUSTED_PATH"
@@ -423,12 +459,17 @@ status_docktail() {
 #
 # Exclusive, and waited for rather than skipped: a queued restart exists
 # because somebody's settings changed, so it has to happen after the one in
-# flight, not instead of it. The bound is a whole stop plus its grace, past
-# which the holder is stuck rather than working and acting anyway is the
-# lesser evil. status stays outside: the settings page polls it while a
-# restart is running.
+# flight, not instead of it. status stays outside: the settings page polls it
+# while a restart is running.
+#
+# The bound has to cover the longest thing that can hold this lock, which is a
+# restart: a stop and its drain, the pause between, the config lock's own wait
+# inside load_config(), then a start waiting for the daemon to be visible and,
+# if it never is, stopping it again. Bounding it by the stop alone let a
+# concurrent action time out at 45s while a restart legitimately held the lock
+# for longer - and then run unlocked, which is the race this exists to stop.
 RC_LOCK="/var/run/docktail-lifecycle.lock"
-RC_LOCK_WAIT=$((STOP_TIMEOUT + 10))
+RC_LOCK_WAIT=$((STOP_TIMEOUT + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 2 + 15))
 
 serialised() {
   local action="$1" locked=0 opened=1 previous_umask rc=0
@@ -451,7 +492,7 @@ serialised() {
     elif flock -w "$RC_LOCK_WAIT" 8 2> /dev/null; then
       locked=1
     else
-      log "Running $action without the lifecycle lock: still held after ${RC_LOCK_WAIT}s, which is longer than a stop can legitimately take."
+      log "Running $action without the lifecycle lock: still held after ${RC_LOCK_WAIT}s, which is longer than a whole restart can legitimately take."
     fi
   fi
 

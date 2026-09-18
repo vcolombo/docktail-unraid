@@ -65,10 +65,11 @@ upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.0
 mkdir -p /boot/config/plugins/docktail
 
 # Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
-# repo at /boot/.git - credentials.cfg and anything staged beside it, because
-# writeFile() renames a temp into place and a worker that dies between the two
-# leaves the same secret under a different name.
-printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\n' > /boot/config/plugins/docktail/.gitignore
+# repo at /boot/.git. Both files' temps are listed, not just the credentials
+# one: a save renames a staged file into place, a worker that dies between the
+# two leaves that file behind, and the migration stages docktail.cfg from a
+# state where it may still hold a credential it is about to move out.
+printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n' > /boot/config/plugins/docktail/.gitignore
 
 if [ ! -f "/boot/config/plugins/docktail/credentials.cfg" ]; then
     install -m 0600 /dev/null /boot/config/plugins/docktail/credentials.cfg

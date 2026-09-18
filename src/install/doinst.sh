@@ -32,13 +32,13 @@ php -d display_errors=stderr -r '
       echo "docktail: removed a second $field from docktail.cfg - credentials.cfg already holds one, and that is the one in use\n";
   }
   foreach ($r["stranded"] as $field) {
-      echo "docktail: left the stored $field in docktail.cfg - it belongs in credentials.cfg, which PHP cannot parse. Repair that file and press Apply.\n";
+      echo "docktail: removed the stored $field from docktail.cfg - it belongs in credentials.cfg, which cannot be read, and docktail.cfg is part of the Unraid Connect flash backup. Repair credentials.cfg, then enter the value again on the DockTail settings page.\n";
   }
   foreach ($r["moved"] as $field) {
       echo "docktail: moved the stored $field out of docktail.cfg into credentials.cfg (0600) - it was in the world-readable file\n";
   }
   foreach ($r["protected"] as $file) {
-      echo "docktail: tightened $file to 0600 - it holds a credential that cannot be moved out of it, so its contents are no longer world-readable\n";
+      echo "docktail: tightened $file to 0600 - it holds a credential and cannot be rewritten, so its contents are no longer readable by every local user\n";
   }
   foreach ($r["exposed"] as $file) {
       echo "docktail: $file holds a credential, cannot be parsed, and could not even be made private - the credential is readable by every local user. Fix its permissions and repair the file.\n";
