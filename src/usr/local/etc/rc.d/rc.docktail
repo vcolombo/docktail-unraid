@@ -289,6 +289,20 @@ start_docktail() {
         settle=$((settle + 1))
       done
       pid_is_docktail "$adopted" && signal_launcher KILL
+
+      # It can exec during that wait - slowly, but it got there. Then the
+      # marker is gone, so signal_launcher matched nothing, and what is on the
+      # end of that pid is the daemon somebody asked for. Falling through here
+      # would start a second one, which is the whole thing this branch exists
+      # to prevent, so this is checked before anything else happens.
+      if is_running; then
+        log "DockTail came up as pid $adopted while it was being stopped; leaving it running rather than starting a second one."
+        return 0
+      fi
+
+      # And if it exec'd but is still not visible - a $BIN that is a script,
+      # mid-interpreter - the anchored name catches what the marker cannot.
+      "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
     fi
   fi
 
