@@ -282,13 +282,13 @@ start_docktail() {
       # Rechecked after the log line, not before it: the pid can exit in the
       # gap and be handed to something else, and an unchecked TERM is the same
       # mistake as an unchecked KILL.
-      pid_is_docktail "$adopted" && kill -TERM "$adopted" 2> /dev/null
+      pid_is_docktail "$adopted" && signal_launcher TERM
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$adopted"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$adopted" && kill -KILL "$adopted" 2> /dev/null
+      pid_is_docktail "$adopted" && signal_launcher KILL
     fi
   fi
 
@@ -344,7 +344,7 @@ start_docktail() {
   waited=0
   while [ "$waited" -lt "$((START_VISIBLE_TIMEOUT * 10))" ]; do
     is_running && break
-    kill -0 "$started" 2> /dev/null || break
+    pid_is_docktail "$started" || break
     sleep 0.1
     waited=$((waited + 1))
   done
@@ -357,13 +357,18 @@ start_docktail() {
     # nothing is tracking. So it is stopped here, while the lock is still held.
     if pid_is_docktail "$started"; then
       log "DockTail was launched as pid $started and has not started within ${START_VISIBLE_TIMEOUT}s; stopping it rather than leaving it to come up untracked."
-      pid_is_docktail "$started" && kill -TERM "$started" 2> /dev/null
+      signal_launcher TERM
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$started"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$started" && kill -KILL "$started" 2> /dev/null
+      pid_is_docktail "$started" && signal_launcher KILL
+
+      # And by its own name, in case it exec'd during the wait: the marker
+      # lives in the launcher's argv and is gone the moment DockTail replaces
+      # it, so the two patterns cover the two halves of that handover.
+      "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
     else
       log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
     fi
@@ -443,6 +448,28 @@ pid_is_docktail() {
   return 1
 }
 
+# signal_launcher SIGNAL - stop the pre-exec launcher, by what it is rather
+# than by a number.
+#
+# `pid_is_docktail` and `kill` are two syscalls, so a pid validated by the
+# first can be gone and reused by the time the second runs - and then the
+# signal lands on a stranger. There is no pidfd tool in Slackware's base, so
+# the number cannot be bound to the identity here; what can be done is to stop
+# using the number for the signal at all.
+#
+# pkill matches and signals in one process, on $LAUNCH_MARKER, which exists in
+# the argv of our launcher and nothing else. A reused pid cannot be hit by it:
+# to be matched, a process would have to carry the marker, which only this
+# script's launcher does. The pid is still used to decide *whether* to act and
+# to wait for the outcome - both harmless if it has been reused, because the
+# next check simply says no.
+#
+# The lifecycle lock is held in every path that calls this, so the only
+# launcher this can match is the one being stopped.
+signal_launcher() {
+  "$PKILL" --ns $$ --euid root "-$1" -f "$LAUNCH_MARKER" 2> /dev/null
+  return 0
+}
 
 stop_docktail() {
   # The pidfile, not just what is visible: a start whose shell was killed
@@ -462,13 +489,13 @@ stop_docktail() {
     # handed to something else before the SIGKILL lands.
     if pid_is_docktail "$recorded"; then
       log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
-      pid_is_docktail "$recorded" && kill -TERM "$recorded" 2> /dev/null
+      pid_is_docktail "$recorded" && signal_launcher TERM
       local settle=0
       while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$recorded"; do
         sleep 1
         settle=$((settle + 1))
       done
-      pid_is_docktail "$recorded" && kill -KILL "$recorded" 2> /dev/null
+      pid_is_docktail "$recorded" && signal_launcher KILL
     else
       log "DockTail is not running."
     fi
