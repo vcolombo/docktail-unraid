@@ -75,9 +75,14 @@ printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cf
 
 upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
 
-if [ ! -f "/boot/config/plugins/docktail/credentials.cfg" ]; then
-    install -m 0600 /dev/null /boot/config/plugins/docktail/credentials.cfg
-fi
+# noclobber, not a test-then-create: an Apply can land between the two and this
+# would then copy /dev/null over credentials it just saved. `set -C` makes the
+# redirection itself fail when the file exists, which is one atomic syscall.
+(
+    umask 077
+    set -C
+    : > /boot/config/plugins/docktail/credentials.cfg
+) 2> /dev/null || true
 chmod 0600 /boot/config/plugins/docktail/credentials.cfg
 
 # Drop the other release channel so both are never installed at once.

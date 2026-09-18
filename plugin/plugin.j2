@@ -60,9 +60,14 @@ printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cf
 
 upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
 
-if [ ! -f "{{ configDirectory }}/credentials.cfg" ]; then
-    install -m 0600 /dev/null {{ configDirectory }}/credentials.cfg
-fi
+# noclobber, not a test-then-create: an Apply can land between the two and this
+# would then copy /dev/null over credentials it just saved. `set -C` makes the
+# redirection itself fail when the file exists, which is one atomic syscall.
+(
+    umask 077
+    set -C
+    : > {{ configDirectory }}/credentials.cfg
+) 2> /dev/null || true
 chmod 0600 {{ configDirectory }}/credentials.cfg
 
 # Drop the other release channel so both are never installed at once.

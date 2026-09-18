@@ -373,6 +373,14 @@ pid_is_docktail() {
   '' | *[!0-9]* | 0 | 1) return 1 ;;
   esac
 
+  # Root, like is_running() and the pkill calls require. Without this an
+  # unprivileged process whose argv happens to contain this path - not hard to
+  # arrange - would pass the check below and be signalled by a root script.
+  case "$(awk '/^Uid:/ { print $2; exit }' "/proc/$pid/status" 2> /dev/null)" in
+  0) ;;
+  *) return 1 ;;
+  esac
+
   case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null)" in
   *"$BIN"*) return 0 ;;
   esac

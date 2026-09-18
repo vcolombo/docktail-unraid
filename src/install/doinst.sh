@@ -47,7 +47,7 @@ php -d display_errors=stderr -r '
       echo "docktail: moved the stored config aside to $file (0600) - it holds a credential and contains a byte no reader can use, and it sat in a file the Unraid Connect flash backup includes. Nothing was reading it; DockTail is on the shipped defaults. Repair that copy and press Apply.\n";
   }
   foreach ($r["exposed"] as $file) {
-      echo "docktail: $file holds a credential, cannot be parsed, and could not even be made private - the credential is readable by every local user. Fix its permissions and repair the file.\n";
+      echo "docktail: $file holds a credential that could not be made private, or could not be moved out of the Unraid Connect flash backup - so it may be readable by other local users, or leave this server in a backup. Check its permissions and contents.\n";
   }
   foreach ($r["ignored"] as $key) {
       echo "docktail: removed $key from the stored config - it is not a DockTail setting and nothing read it\n";

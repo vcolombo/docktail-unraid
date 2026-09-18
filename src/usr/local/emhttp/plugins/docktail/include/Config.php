@@ -667,10 +667,14 @@ final class Config
                 // a separate "PHP cannot parse it" category: since read() uses
                 // this same reader, that distinction described nothing.
                 if ($read['nul'] || $read['unreadable']) {
-                    $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
                     $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
 
+                    // Named as left alone only if it is going to be: the
+                    // quarantine below moves it, and reporting both would be
+                    // two contradictory lines about one file.
                     if ( ! self::holdsSecret($file)) {
+                        $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
+
                         continue;
                     }
 
@@ -699,7 +703,8 @@ final class Config
                         // fix that - it only stops local readers - so this is
                         // an exposure whatever it returns.
                         @chmod($file, 0600);
-                        $report['exposed'][] = $file;
+                        $report['exposed'][]     = $file;
+                        $report['unparseable'][] = $file;
                         continue;
                     }
 
@@ -707,6 +712,7 @@ final class Config
                     // the mode is the whole exposure there - and a failed
                     // chmod is the loudest thing this function can find.
                     $report[@chmod($file, 0600) ? 'protected' : 'exposed'][] = $file;
+                    $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
 
                     continue;
                 }
