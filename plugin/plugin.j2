@@ -50,8 +50,10 @@ upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
 mkdir -p {{ configDirectory }}
 
 # Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
-# repo at /boot/.git.
-echo "credentials.cfg" > {{ configDirectory }}/.gitignore
+# repo at /boot/.git - credentials.cfg and anything staged beside it, because
+# writeFile() renames a temp into place and a worker that dies between the two
+# leaves the same secret under a different name.
+printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\n' > {{ configDirectory }}/.gitignore
 
 if [ ! -f "{{ configDirectory }}/credentials.cfg" ]; then
     install -m 0600 /dev/null {{ configDirectory }}/credentials.cfg

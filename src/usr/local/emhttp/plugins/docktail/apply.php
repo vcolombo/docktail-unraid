@@ -33,11 +33,31 @@ switch ($action) {
         $settings = Config::coerceSettings($_POST);
         $secrets  = Config::coerceSecrets($_POST);
 
-        if ( ! Config::write($settings, $secrets)) {
+        // The revision the form was rendered against. A save composed against
+        // an older pair is refused rather than applied: renames are atomic but
+        // nothing orders two of them, so a request whose answer never reached
+        // the browser - a timeout, a dropped connection - could otherwise land
+        // after the retry that replaced it and win.
+        $expected = isset($_POST['revision']) ? (string) $_POST['revision'] : null;
+
+        $result = Config::write($settings, $secrets, $expected);
+        if ($result === 'stale') {
+            http_response_code(409);
+            header('X-DockTail-Stale: 1');
+            echo "Not saved: the stored configuration changed since this page was loaded, "
+                . "so this form would overwrite it. Reload to see what is stored.\n";
+            break;
+        }
+
+        if ($result !== 'ok') {
             http_response_code(500);
             echo "Failed to write DockTail configuration.\n";
             break;
         }
+
+        // What the form should carry from here on, so a second Apply without a
+        // reload is not refused as stale.
+        header('X-DockTail-Revision: ' . Config::revision());
 
         // First, because the page renders the whole reply as one line of text
         // and a refusal is the part the person needs to read. "Dropped from"

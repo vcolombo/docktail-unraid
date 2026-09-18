@@ -201,7 +201,18 @@ final class Config
     {
         $values    = [];
         $malformed = [];
-        $body      = (string) @file_get_contents($file);
+        $raw       = @file_get_contents($file);
+
+        // A file that exists and cannot be read is not an empty file. It is
+        // its own answer, because the difference matters twice: the settings
+        // page would otherwise show defaults for a config that is still there,
+        // and the migration would compare its rendering against "", see
+        // nothing worth writing, and report success for a file it never read.
+        if ($raw === false && is_file($file)) {
+            return ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => true];
+        }
+
+        $body = (string) $raw;
 
         // The whole file, not the line: a NUL is the one byte the shell cannot
         // carry, and `read` drops it before the pattern match runs - so the
@@ -210,7 +221,7 @@ final class Config
         // agree with the other on a single line of such a file, so both refuse
         // all of it and say so. rc.docktail does the same check, the same way.
         if (strpos($body, "\0") !== false) {
-            return ['values' => [], 'malformed' => [], 'nul' => true];
+            return ['values' => [], 'malformed' => [], 'nul' => true, 'unreadable' => false];
         }
 
         // Split on \n by hand: file() with FILE_IGNORE_NEW_LINES strips a
@@ -251,7 +262,7 @@ final class Config
             $values[$m[1]] = $value;
         }
 
-        return ['values' => $values, 'malformed' => $malformed, 'nul' => false];
+        return ['values' => $values, 'malformed' => $malformed, 'nul' => false, 'unreadable' => false];
     }
 
     /**
@@ -297,6 +308,36 @@ final class Config
     }
 
     /**
+     * What the stored pair looks like right now, as one short string.
+     *
+     * The settings page renders it into the form and apply.php hands it back,
+     * so a save can be refused when it was composed against a config that has
+     * since changed. Atomic renames order nothing: a save whose answer never
+     * arrived - a browser timeout, a dropped connection - can still be inside
+     * write() while the person reloads and saves again, and without this the
+     * older form would land last and win.
+     *
+     * Content, not mtime: a flash filesystem's timestamps are coarse, and two
+     * saves within the same second are exactly the case this exists for.
+     */
+    public static function revision(): string
+    {
+        return self::withLock(static fn (): string => self::revisionOfStored(), LOCK_SH);
+    }
+
+    /** The same thing, for callers that already hold the lock. */
+    private static function revisionOfStored(): string
+    {
+        $parts = [];
+        foreach ([self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
+            $body    = @file_get_contents($file);
+            $parts[] = $body === false ? '-' : hash('sha256', $body);
+        }
+
+        return substr(hash('sha256', implode('.', $parts)), 0, 16);
+    }
+
+    /**
      * Persist both files, as one change.
      *
      * Each file is staged and renamed, so a concurrent rc.docktail read never
@@ -305,17 +346,27 @@ final class Config
      * in place rather than this submission's settings beside the last one's
      * credentials.
      *
-     * @param array<string, string> $settings
-     * @param array<string, string> $secrets
+     * @param  array<string, string> $settings
+     * @param  array<string, string> $secrets
+     * @param  string|null $expected the revision the form was composed
+     *         against, or null to write regardless
+     * @return 'ok'|'stale'|'failed' stale means the stored pair changed since
+     *         then and nothing was written
      */
-    public static function write(array $settings, array $secrets): bool
+    public static function write(array $settings, array $secrets, ?string $expected = null): string
     {
-        return self::withLock(static function () use ($settings, $secrets): bool {
+        return self::withLock(static function () use ($settings, $secrets, $expected): string {
+            // Inside the lock, with the write: checking it anywhere else is
+            // the same race in a different place.
+            if ($expected !== null && $expected !== self::revisionOfStored()) {
+                return 'stale';
+            }
+
             // Inside the lock: two first-time saves would otherwise both see
             // the directory missing, and the one whose mkdir() lost would
             // report a failure for a directory that now exists.
             if ( ! is_dir(CONFIG_DIR) && ! @mkdir(CONFIG_DIR, 0755, true) && ! is_dir(CONFIG_DIR)) {
-                return false;
+                return 'failed';
             }
 
             $staged = [];
@@ -327,13 +378,13 @@ final class Config
                 if ($tmp === false) {
                     self::discardStaged($staged);
 
-                    return false;
+                    return 'failed';
                 }
 
                 $staged[$file] = [$tmp, $mode];
             }
 
-            return self::commitStaged($staged);
+            return self::commitStaged($staged) ? 'ok' : 'failed';
         });
     }
 
@@ -524,6 +575,7 @@ final class Config
                 'ignored'     => [],
                 'malformed'   => [],
                 'unparseable' => [],
+                'unreadable'  => [],
             ];
             $staged = [];
             // What each staged file would report, held back until it lands.
@@ -546,19 +598,20 @@ final class Config
             foreach (array_keys($modes) as $file) {
                 $read = is_file($file)
                     ? self::parseAsReader($file)
-                    : ['values' => [], 'malformed' => [], 'nul' => false];
+                    : ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => false];
 
                 // Reported and left alone: a file holding a NUL is the one
-                // file neither reader will take a line from, so there is
-                // nothing to normalise and a rewrite would drop bytes nobody
-                // has seen. Everything else is readable - a stray line is
-                // reported as malformed and removed by the pass below - which
-                // is why there is no longer a separate "PHP cannot parse it"
-                // category: since read() uses this same reader, that
-                // distinction described nothing.
-                if ($read['nul']) {
-                    $report['unparseable'][] = $file;
-                    $state[$file]            = ['values' => [], 'malformed' => [], 'usable' => false];
+                // file neither reader will take a line from, and one that
+                // exists but cannot be read is one this function knows
+                // nothing about. Either way there is nothing to normalise and
+                // a rewrite would destroy what is there. Everything else is
+                // readable - a stray line is reported as malformed and
+                // removed by the pass below - which is why there is no longer
+                // a separate "PHP cannot parse it" category: since read() uses
+                // this same reader, that distinction described nothing.
+                if ($read['nul'] || $read['unreadable']) {
+                    $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
+                    $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
 
                     // The secret cannot be moved out of a file that cannot be
                     // rewritten - rewriting it is what would lose the lines
@@ -844,6 +897,7 @@ final class Config
             'ignored'     => [],
             'malformed'   => [],
             'unparseable' => $report['unparseable'],
+            'unreadable'  => $report['unreadable'],
         ];
     }
 
@@ -977,7 +1031,19 @@ final class Config
         $previous = [];
         foreach (array_keys($staged) as $file) {
             $was = @file_get_contents($file);
+
+            // Absent and unreadable are different answers. null means there
+            // was no file, and a rollback deletes what this commit created;
+            // an existing file that cannot be read has no rollback at all, so
+            // nothing is renamed - publishing the new pair would leave no way
+            // back to a config that is still sitting there.
             if ($was === false) {
+                if (is_file($file)) {
+                    self::discardStaged($staged);
+
+                    return false;
+                }
+
                 $previous[$file] = null;
                 continue;
             }
@@ -1234,6 +1300,10 @@ final class Config
 <form method="POST" id="docktail_settings" action="/plugins/docktail/apply.php" onsubmit="docktailApply();return false;">
 <input type="hidden" name="csrf_token" value="<?= h($token); ?>">
 <input type="hidden" name="action" value="save">
+<!-- What the stored pair looked like when this form was rendered. apply.php
+     refuses a save that was composed against an older one rather than letting
+     it overwrite whatever landed since - see Config::write(). -->
+<input type="hidden" name="revision" id="docktail_revision" value="<?= h(self::revision()); ?>">
 
 <table class="unraid tablesorter"><thead><tr><td>DockTail Settings</td></tr></thead></table>
 
@@ -1573,6 +1643,13 @@ function docktailApply() {
             // rearm Apply, because the person has a value to correct and would
             // otherwise have to reload the tab to resubmit it. An edit made
             // while this was in flight rearms it for the same reason.
+            // The pair this form now matches, so a second Apply without a
+            // reload is not refused as composed against an older one.
+            var revision = xhr.getResponseHeader('X-DockTail-Revision');
+            if (revision) {
+                $('#docktail_revision').val(revision);
+            }
+
             var refused = xhr.getResponseHeader('X-DockTail-Refused');
             live.out.toggleClass('docktail-apply-error', !!refused)
                 .text(String(data).trim() || 'Settings saved.');
@@ -1594,6 +1671,18 @@ function docktailApply() {
             //
             // A 403 is the exception: Unraid's CSRF check runs before any of
             // this plugin's code, so nothing was written and a retry is safe.
+            // 409: the stored pair changed since this form was rendered, so
+            // the server refused it rather than overwriting. Nothing was
+            // written, but this form cannot be trusted either - it describes a
+            // configuration that is no longer the one stored.
+            if (xhr.status === 409) {
+                state.unknown = true;
+                docktailApplyUnknown(live, String(xhr.responseText || '').trim()
+                    || 'Not saved: the stored configuration changed since this page was loaded.');
+
+                return;
+            }
+
             if (status === 'timeout' || xhr.status === 0 || xhr.status >= 500) {
                 state.unknown = true;
                 docktailApplyUnknown(live, status === 'timeout'
