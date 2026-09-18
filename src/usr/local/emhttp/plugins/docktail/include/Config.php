@@ -33,6 +33,14 @@ final class Config
     public const SETTINGS_FILE    = CONFIG_DIR . '/docktail.cfg';
     public const CREDENTIALS_FILE = CONFIG_DIR . '/credentials.cfg';
 
+    /**
+     * The shipped defaults, which live with the plugin rather than on the
+     * flash: an install replaces this file, and nothing takes the config lock
+     * to do it, so anything pairing its values with a revision has to read it
+     * exactly once.
+     */
+    public const DEFAULTS_FILE = PLUGIN_ROOT . '/default.cfg';
+
     // /var/run, not /tmp and not the flash: /tmp is world-writable, so any
     // local process could create this file first and hold it, and a blocking
     // wait on it would stall every Apply. /var/run is root-owned, and the
@@ -147,7 +155,10 @@ final class Config
     public static function snapshot(): array
     {
         return self::withLock(static function (bool $locked): array {
-            $values = self::storedValues();
+            // One read, two uses: the values on the form and the revision that
+            // fences them have to describe the same defaults.
+            $defaults = self::defaultsBody();
+            $values   = self::storedValues($defaults);
 
             // Without the lock the two reads are not one snapshot: a save can
             // land between them and the form would carry the old values with
@@ -158,7 +169,7 @@ final class Config
             // saving them has to wait for whatever holds the lock.
             return [
                 'values'   => $values,
-                'revision' => $locked ? self::revisionOfStored() : '',
+                'revision' => $locked ? self::revisionOfStored($defaults) : '',
                 'locked'   => $locked,
             ];
         }, LOCK_SH);
@@ -182,9 +193,9 @@ final class Config
      *
      * @return array<string, string>
      */
-    private static function storedValues(): array
+    private static function storedValues(?string $defaultsBody = null): array
     {
-        $values = self::defaults();
+        $values = self::defaults($defaultsBody);
         $values = array_merge($values, self::readAsService(self::SETTINGS_FILE));
         $values = array_merge($values, self::readAsService(self::CREDENTIALS_FILE));
 
@@ -195,10 +206,33 @@ final class Config
         return $values;
     }
 
-    /** @return array<string, string> */
-    public static function defaults(): array
+    /**
+     * The shipped defaults.
+     *
+     * $body lets a caller hand over bytes it has already read: an install
+     * replaces default.cfg without taking this lock, so reading it twice - once
+     * for the form and once for the revision - can pair old values with a new
+     * hash, and the fence would then accept a form built from defaults that no
+     * longer exist.
+     *
+     * @return array<string, string>
+     */
+    public static function defaults(?string $body = null): array
     {
-        return self::readAsService(PLUGIN_ROOT . '/default.cfg');
+        if ($body === null) {
+            return self::readAsService(self::DEFAULTS_FILE);
+        }
+
+        return array_intersect_key(
+            self::parseBody($body)['values'],
+            array_flip(self::KNOWN_KEYS)
+        );
+    }
+
+    /** The bytes of the shipped defaults, or false if they cannot be read. */
+    private static function defaultsBody(): string|false
+    {
+        return @file_get_contents(self::DEFAULTS_FILE);
     }
 
     /**
@@ -240,9 +274,7 @@ final class Config
      */
     private static function parseAsReader(string $file): array
     {
-        $values    = [];
-        $malformed = [];
-        $raw       = @file_get_contents($file);
+        $raw = @file_get_contents($file);
 
         // A file that exists and cannot be read is not an empty file. It is
         // its own answer, because the difference matters twice: the settings
@@ -253,7 +285,18 @@ final class Config
             return ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => true];
         }
 
-        $body = (string) $raw;
+        return self::parseBody((string) $raw);
+    }
+
+    /**
+     * The same reader, over bytes somebody else read.
+     *
+     * @return array{values: array<string, string>, malformed: list<string>, nul: bool, unreadable: bool}
+     */
+    private static function parseBody(string $body): array
+    {
+        $values    = [];
+        $malformed = [];
 
         // The whole file, not the line: a NUL is the one byte the shell cannot
         // carry, and `read` drops it before the pattern match runs - so the
@@ -380,10 +423,19 @@ final class Config
      * stale, or Apply would write the old ones back into docktail.cfg and
      * mask the new ones.
      */
-    private static function revisionOfStored(): string
+    private static function revisionOfStored(string|false|null $defaultsBody = null): string
     {
-        $parts = [];
-        foreach ([PLUGIN_ROOT . '/default.cfg', self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
+        // The defaults are hashed from the bytes the caller read, when it read
+        // them: reading the file again here is what allowed an install between
+        // the two reads to produce old values with a new hash.
+        $defaults = $defaultsBody === null ? self::defaultsBody() : $defaultsBody;
+        if ($defaults === false && is_file(self::DEFAULTS_FILE)) {
+            return '';
+        }
+
+        $parts = [$defaults === false ? 'absent' : hash('sha256', $defaults)];
+
+        foreach ([self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
             $body = @file_get_contents($file);
             if ($body === false) {
                 if (is_file($file)) {
@@ -976,6 +1028,17 @@ final class Config
 
         $keys = implode('|', array_map('preg_quote', self::SECRET_KEYS));
 
+        // Scanned twice: as it is, and with NUL bytes removed. A NUL can sit
+        // inside the key name or straight after the `=`, which would hide the
+        // assignment from any pattern - and a file holding a NUL is exactly
+        // the file this scan is asked about, because that is the file neither
+        // reader will touch. Stripping them cannot invent a credential: the
+        // key name and its value still have to be there.
+        $bodies = [$body];
+        if (strpos($body, "\0") !== false) {
+            $bodies[] = str_replace("\0", '', $body);
+        }
+
         // Deliberately looser than the reader: this decides whether to move a
         // file out of the flash backup, so it has to catch a hand-edited line
         // the reader would reject - leading space, lowercase key, spaces around
@@ -989,7 +1052,13 @@ final class Config
         // is an explicitly empty value, which is how the settings page stores
         // a field somebody cleared - matching that would quarantine a file
         // over a field that holds nothing.
-        return preg_match('/(?:' . $keys . ')[ \t]*=[ \t]*(?!""[ \t]*(?:$|[\r\n]))/im', $body) === 1;
+        foreach ($bodies as $candidate) {
+            if (preg_match('/(?:' . $keys . ')[ \t]*=[ \t]*(?!""[ \t]*(?:$|[\r\n]))/im', $candidate) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1033,6 +1102,24 @@ final class Config
      */
     private static function migrationFailed(array $report): array
     {
+        // A credential this run was going to move is still in the settings
+        // file, because nothing was written. That file is part of the flash
+        // backup, so the mode is a consolation rather than a fix - but it is
+        // the only thing available here, and saying nothing at all was the
+        // previous behaviour. The fields go in unremoved, which tells the
+        // person exactly what is still where.
+        $unremoved = array_merge($report['stranded'], $report['moved']);
+        $protected = $report['protected'];
+        $exposed   = $report['exposed'];
+
+        if ($unremoved !== [] && self::holdsSecret(self::SETTINGS_FILE)) {
+            if (@chmod(self::SETTINGS_FILE, 0600)) {
+                $protected[] = self::SETTINGS_FILE;
+            } else {
+                $exposed[] = self::SETTINGS_FILE;
+            }
+        }
+
         // Nothing landed on disk, so the file-level reports are dropped:
         // saying a credential was moved while it is still sitting where it was
         // would be worse than saying nothing. What did happen regardless of
@@ -1048,10 +1135,10 @@ final class Config
             'dropped'     => [],
             'superseded'  => [],
             'stranded'    => [],
-            'unremoved'   => $report['stranded'],
+            'unremoved'   => $unremoved,
             'moved'       => [],
-            'protected'   => $report['protected'],
-            'exposed'     => $report['exposed'],
+            'protected'   => $protected,
+            'exposed'     => $exposed,
             'quarantined' => $report['quarantined'],
             'ignored'     => [],
             'malformed'   => [],
@@ -1829,18 +1916,27 @@ function docktailApply() {
             // or its own save will be refused.
             var stillMine = state.generation === sentGeneration
                 && $('#docktail_revision').val() === sentRevision;
+            var revision = xhr.getResponseHeader('X-DockTail-Revision');
+
             if ( ! stillMine) {
-                // The form on screen is a different one, so its token and its
-                // clean/dirty state are its own. But its Apply was disarmed by
-                // this request - the render below sees state.request set and
-                // greys the fresh button - so it has to be put back, or an
-                // edit made in the new fragment cannot be submitted at all.
+                // The form on screen is a different one, so its token is its
+                // own. If that token is already the one this save produced -
+                // the fragment was re-rendered after the write landed - then
+                // it matches what is stored and there is nothing to save, so
+                // it is clean. Otherwise its Apply has to be put back, because
+                // this request greyed it: the render saw a request in flight.
+                if (revision && ! state.dirty && $('#docktail_revision').val() === revision) {
+                    state.clean = true;
+                    live.apply.prop('disabled', true);
+
+                    return;
+                }
+
                 live.apply.prop('disabled', ! state.dirty && state.clean);
 
                 return;
             }
 
-            var revision = xhr.getResponseHeader('X-DockTail-Revision');
             if (revision) {
                 $('#docktail_revision').val(revision);
             }
