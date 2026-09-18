@@ -245,11 +245,18 @@ export_if_set() {
 #
 # The path is escaped because this is a regular expression: a dot in a
 # directory name would otherwise match anything.
+#
+# The interpreter branch names the same shells pid_is_docktail() accepts, and
+# nothing else. `[^ ]*sh` would have matched /usr/bin/ssh, fish, or any
+# executable a user happened to name mysh - so a root process whose next
+# argument was this path would have been killed as though it were the daemon.
+# The two must agree: anything these kills reach, that predicate has to call
+# ours.
 cleanup_pattern() {
   local escaped
   escaped=$(printf '%s' "$BIN" | sed -e 's/[][\.^$*+?(){}|\/]/\\&/g')
 
-  printf '(^%s( |$))|(^[^ ]*sh %s( |$))' "$escaped" "$escaped"
+  printf '(^%s( |$))|(^([^ ]*\/)?(bash|sh|dash|ash|ksh) %s( |$))' "$escaped" "$escaped"
 }
 
 is_running() {

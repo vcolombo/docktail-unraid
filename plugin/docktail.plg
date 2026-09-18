@@ -86,7 +86,16 @@ printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cf
     set -C
     : > /boot/config/plugins/docktail/credentials.cfg
 ) 2> /dev/null || true
-chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+# Only a real file. chmod follows symlinks and has no option not to, so this
+# line - running as root - would otherwise set 0600 on whatever a symlink left
+# at that path happened to point at. The umask above already creates the file
+# private, so this is for the one it did not create: an existing credentials
+# file from a previous install, which the noclobber redirection left alone.
+if [ -f /boot/config/plugins/docktail/credentials.cfg ] && [ ! -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+elif [ -e /boot/config/plugins/docktail/credentials.cfg ] || [ -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    echo "docktail: /boot/config/plugins/docktail/credentials.cfg is not a regular file - leaving it as it is. DockTail cannot store credentials there until it is replaced with one."
+fi
 
 upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
 

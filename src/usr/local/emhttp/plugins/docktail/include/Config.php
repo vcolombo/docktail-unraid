@@ -593,11 +593,21 @@ final class Config
      *
      * @template T
      * @param  callable(): T $work
-     * @param  int           $operation LOCK_EX to write, LOCK_SH to read
+     * @param  int           $operation   LOCK_EX to write, LOCK_SH to read
+     * @param  ?string       $consequence what losing the lock means for this
+     *                                    caller, when it is not what the
+     *                                    operation implies
      * @return T
      */
-    private static function withLock(callable $work, int $operation = LOCK_EX)
+    private static function withLock(callable $work, int $operation = LOCK_EX, ?string $consequence = null)
     {
+        // What losing the lock costs follows from the operation for two of the
+        // three callers; the boot migration is the exception, because it
+        // declines to run rather than running unlocked, and says so itself.
+        $consequence ??= $operation === LOCK_SH
+            ? 'A save landing in the middle of this read could be picked up half-applied.'
+            : 'A save landing together with this one could leave one file from each.';
+
         // Created under 077, not created and then tightened: with a umask of
         // 022 the file would exist as 0644 for the moment in between, long
         // enough for another local user to open it read-only and hold a shared
@@ -608,7 +618,7 @@ final class Config
         umask($previousUmask);
 
         if ($handle === false) {
-            self::logUnlocked(self::LOCK_FILE . ' could not be opened', $operation);
+            self::logUnlocked(self::LOCK_FILE . ' could not be opened', $operation, $consequence);
 
             return $work(false);
         }
@@ -629,7 +639,7 @@ final class Config
         }
 
         if ( ! $locked) {
-            self::logUnlocked('still held after ' . self::LOCK_WAIT . 's', $operation);
+            self::logUnlocked('still held after ' . self::LOCK_WAIT . 's', $operation, $consequence);
         }
 
         try {
@@ -651,17 +661,15 @@ final class Config
      * rc.docktail says the same thing into the same file, so both sides of
      * the pair read alike in /var/log/docktail.log.
      *
-     * The same lock is taken from two places: a page render or an Apply under
-     * the webGUI, and the migration under doinst.sh at boot. Which one hit the
-     * contention is the first thing worth knowing, and only one of them runs
-     * from the CLI.
+     * The same lock is taken from three places, and what losing it means is
+     * different in each: a page render can read a half-applied pair, an
+     * unfenced save can interleave with another, and the boot migration now
+     * declines to run at all. So the consequence is the caller's to state -
+     * withLock() cannot know it, and a generic sentence was wrong for
+     * whichever caller it did not describe.
      */
-    private static function logUnlocked(string $reason, int $operation): void
+    private static function logUnlocked(string $reason, int $operation, string $consequence): void
     {
-        $consequence = $operation === LOCK_SH
-            ? 'A save landing in the middle of this read could be picked up half-applied.'
-            : 'A save landing together with this one could leave one file from each.';
-
         $line = sprintf(
             "%s %s: %s the config without the lock: %s. %s\n",
             date('Y-m-d H:i:s'),
@@ -720,14 +728,17 @@ final class Config
      * Every outcome is reported under its own reason, because they ask
      * different things of whoever reads the boot log.
      *
-     * @return array{ok: bool, dropped: list<string>, superseded: list<string>,
+     * @return array{ok: bool, deferred?: bool, dropped: list<string>,
+     *         superseded: list<string>,
      *         stranded: list<string>, unremoved: list<string>, moved: list<string>,
      *         protected: list<string>, exposed: list<string>,
      *         quarantined: list<string>,
      *         ignored: list<string>, malformed: list<string>,
      *         unparseable: list<string>}
      *         ok is false only when a file that needed converting could not be
-     *         written; dropped names fields whose value could not be stored;
+     *         written; deferred says the config lock was held by a save, so
+     *         nothing was read or written at all and the next boot tries
+     *         again; dropped names fields whose value could not be stored;
      *         superseded names settings-file secrets that lost to a credential
      *         already stored; stranded names ones removed because the
      *         credentials file could not be read and the settings file is in
@@ -763,6 +774,23 @@ final class Config
                 'unparseable' => [],
                 'unreadable'  => [],
             ];
+            // Without the lock, nothing. withLock() fails open after five
+            // seconds, and this rewrite is a read-stage-rename of the whole
+            // pair: run unlocked beside an Apply that is mid-commit, it reads
+            // the pre-save values and renames them over what the Apply just
+            // wrote - the user's settings gone, or a credential moved back
+            // into the world-readable file. The fenced save refuses for the
+            // same reason.
+            //
+            // Deferring is cheap here in a way it is not for a save: this runs
+            // on every boot and the rewrite is a no-op once converted, so the
+            // next boot does it - and the Apply holding the lock writes the
+            // escaped form anyway, which is what the migration is for. The
+            // report says so rather than claiming there was nothing to do.
+            if ( ! $locked) {
+                return ['ok' => true, 'deferred' => true] + $report;
+            }
+
             $staged = [];
             // What each staged file would report, held back until it lands.
             $pending = [];
@@ -958,7 +986,7 @@ final class Config
             }
 
             return ['ok' => true] + $report;
-        });
+        }, LOCK_EX, 'Nothing was read or written, so a save in progress keeps what it saved; the next boot converts the config instead.');
     }
 
     /**
