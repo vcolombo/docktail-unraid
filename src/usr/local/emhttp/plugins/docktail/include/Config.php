@@ -41,6 +41,19 @@ final class Config
      */
     public const DEFAULTS_FILE = PLUGIN_ROOT . '/default.cfg';
 
+    /**
+     * The revision of the pair as it was last committed whole.
+     *
+     * Written after both renames, so a boot that finds it disagreeing with
+     * what is on disk has found a pair that was interrupted between them -
+     * a power loss or a flash failure mid-save, which no amount of ordering
+     * inside one process can prevent. It cannot repair that: which half is
+     * right is not knowable from here. It can say so, which is the difference
+     * between a config somebody can look at and one that silently mixes two
+     * saves.
+     */
+    public const PAIR_MARKER = CONFIG_DIR . '/.pair';
+
     // /var/run, not /tmp and not the flash: /tmp is world-writable, so any
     // local process could create this file first and hold it, and a blocking
     // wait on it would stall every Apply. /var/run is root-owned, and the
@@ -518,11 +531,19 @@ final class Config
                 $staged[$file] = [$tmp, $mode];
             }
 
-            $ok = self::commitStaged($staged);
+            $ok       = self::commitStaged($staged);
+            $revision = self::revisionOfStored();
+
+            // After both renames, never between them: that is what makes it
+            // evidence. A boot that finds this disagreeing with the files has
+            // found a save that was interrupted.
+            if ($ok && $revision !== '') {
+                self::recordPair($revision);
+            }
 
             return [
                 'status'   => $ok ? 'ok' : 'failed',
-                'revision' => self::revisionOfStored(),
+                'revision' => $revision,
             ];
         });
     }
@@ -723,7 +744,17 @@ final class Config
                 'malformed'   => [],
                 'unparseable' => [],
                 'unreadable'  => [],
+                'torn'        => [],
             ];
+
+            // Before anything is rewritten: a pair that does not match the
+            // marker was interrupted between its two renames - a power loss
+            // or a flash failure during a save. This cannot know which half
+            // is newer, so it says so and changes nothing on that account.
+            $revisionOnDisk = self::revisionOfStored();
+            if ($revisionOnDisk !== '' && ! self::pairLooksWhole($revisionOnDisk)) {
+                $report['torn'][] = self::SETTINGS_FILE;
+            }
             $staged = [];
             // What each staged file would report, held back until it lands.
             $pending = [];
@@ -908,6 +939,14 @@ final class Config
                 return self::migrationFailed($report);
             }
 
+            // Whatever it was before, the pair on disk now is one this code
+            // wrote, so the marker is brought up to date - otherwise the next
+            // boot would report the same interruption for ever.
+            $after = self::revisionOfStored();
+            if ($after !== '') {
+                self::recordPair($after);
+            }
+
             foreach ($pending as [$lost, $unknown, $broken]) {
                 $report['dropped']   = array_merge($report['dropped'], $lost);
                 $report['ignored']   = array_merge($report['ignored'], $unknown);
@@ -1052,13 +1091,47 @@ final class Config
         // is an explicitly empty value, which is how the settings page stores
         // a field somebody cleared - matching that would quarantine a file
         // over a field that holds nothing.
-        foreach ($bodies as $candidate) {
-            if (preg_match('/(?:' . $keys . ')[ \t]*=[ \t]*(?!""[ \t]*(?:$|[\r\n]))/im', $candidate) === 1) {
-                return true;
-            }
+        // The empty-value exception applies to the body as it is: `KEY=""` is
+        // how the settings page stores a cleared field. It must NOT apply to
+        // the NUL-stripped copy, where `KEY="\0"` becomes `KEY=""` - a value
+        // made of NUL bytes is still bytes somebody put in a credential field,
+        // in a file that is about to be left in the flash backup.
+        if (preg_match('/(?:' . $keys . ')[ \t]*=[ \t]*(?!""[ \t]*(?:$|[\r\n]))/im', $body) === 1) {
+            return true;
         }
 
-        return false;
+        return isset($bodies[1])
+            && preg_match('/(?:' . $keys . ')[ \t]*=/im', $bodies[1]) === 1;
+    }
+
+    /** Note the revision of a pair that landed whole. */
+    private static function recordPair(string $revision): void
+    {
+        $tmp = self::stageBytes(self::PAIR_MARKER, $revision . "\n", 0644);
+        if ($tmp === false) {
+            return;
+        }
+
+        if ( ! @rename($tmp, self::PAIR_MARKER)) {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * Was the pair on disk last written whole?
+     *
+     * Only false when there is a marker and it disagrees: no marker at all is
+     * an install that has never saved, or one that predates this, and guessing
+     * "torn" there would cry wolf on every upgrade.
+     */
+    private static function pairLooksWhole(string $revision): bool
+    {
+        $recorded = @file_get_contents(self::PAIR_MARKER);
+        if ($recorded === false) {
+            return true;
+        }
+
+        return trim($recorded) === $revision;
     }
 
     /**
@@ -1161,6 +1234,7 @@ final class Config
             'malformed'   => [],
             'unparseable' => $report['unparseable'],
             'unreadable'  => $report['unreadable'],
+            'torn'        => $report['torn'],
         ];
     }
 

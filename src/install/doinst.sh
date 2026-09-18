@@ -58,6 +58,9 @@ php -d display_errors=stderr -r '
   foreach ($r["unparseable"] as $file) {
       echo "docktail: left $file alone - it contains a NUL byte, which neither the settings page nor the service can read, so both fall back to the shipped defaults for whatever it held. Repair the file (keep a copy first); pressing Apply would save those defaults over it.\n";
   }
+  foreach ($r["torn"] as $file) {
+      echo "docktail: the two stored config files do not look like one save - the last one was interrupted between writing them, which a power loss during Apply can do. DockTail is running on what is there; open the DockTail settings page, check the values and press Apply to write a consistent pair.\n";
+  }
   foreach ($r["unreadable"] as $file) {
       echo "docktail: could not read $file at all - it is still there, so nothing was changed, and the service is running on the shipped defaults for whatever it holds. Check the flash device.\n";
   }
