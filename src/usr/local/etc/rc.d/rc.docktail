@@ -453,7 +453,14 @@ pid_is_docktail() {
     0) argv0="$arg" ;;
     1) argv1="$arg" ;;
     esac
-    [ "$arg" = "$LAUNCH_MARKER" ] && marked=1
+    # The prefix, because the token carries random bytes after it. Matching
+    # the bare marker stopped identifying anything the moment the token was
+    # introduced, and only the tests' script-shaped $BIN hid it: a compiled
+    # binary has no interpreter layer to fall back on, so the pre-exec
+    # launcher - the whole reason this branch exists - went unrecognised.
+    case "$arg" in
+    "$LAUNCH_MARKER" | "${LAUNCH_MARKER}-"*) marked=1 ;;
+    esac
     [ "$arg" = "$BIN" ] && named=1
     index=$((index + 1))
   done < "/proc/$pid/cmdline" 2> /dev/null
