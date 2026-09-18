@@ -41,7 +41,7 @@ switch ($action) {
         $expected = isset($_POST['revision']) ? (string) $_POST['revision'] : null;
 
         $result = Config::write($settings, $secrets, $expected);
-        if ($result === 'stale') {
+        if ($result['status'] === 'stale') {
             http_response_code(409);
             header('X-DockTail-Stale: 1');
             echo "Not saved: the stored configuration changed since this page was loaded, "
@@ -49,15 +49,18 @@ switch ($action) {
             break;
         }
 
-        if ($result !== 'ok') {
+        if ($result['status'] !== 'ok') {
             http_response_code(500);
             echo "Failed to write DockTail configuration.\n";
             break;
         }
 
         // What the form should carry from here on, so a second Apply without a
-        // reload is not refused as stale.
-        header('X-DockTail-Revision: ' . Config::revision());
+        // reload is not refused as stale. Taken inside write()'s own lock: a
+        // revision read after that lock is released can belong to a later
+        // writer, and handing it to this form would let it overwrite that
+        // writer's save.
+        header('X-DockTail-Revision: ' . $result['revision']);
 
         // First, because the page renders the whole reply as one line of text
         // and a refusal is the part the person needs to read. "Dropped from"

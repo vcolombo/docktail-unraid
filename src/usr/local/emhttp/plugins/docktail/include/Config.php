@@ -128,30 +128,56 @@ final class Config
      */
     public static function read(): array
     {
-        return self::withLock(static function (): array {
-            // Every read on this side goes through the same parser the service
-            // uses, rather than parse_ini_file() or Unraid's
-            // parse_plugin_cfg(). Both of those run PHP's ini scanner, which
-            // turns an unquoted `true` into `1` and an unquoted `none` into
-            // nothing, while rc.docktail's reader keeps the text. Quoted
-            // values - all this plugin writes - come back identically either
-            // way, so nothing changes for a file the settings page wrote; what
-            // this removes is the disagreement over a hand-edited line, where
-            // the page would show a value the service is not using.
-            //
-            // parse_plugin_cfg() is not needed for its merge either: it layers
-            // default.cfg under the stored settings, which is what defaults()
-            // does here, from the same file.
-            $values = self::defaults();
-            $values = array_merge($values, self::readAsService(self::SETTINGS_FILE));
-            $values = array_merge($values, self::readAsService(self::CREDENTIALS_FILE));
+        return self::withLock(static fn (): array => self::storedValues(), LOCK_SH);
+    }
 
-            foreach (self::SECRET_KEYS as $key) {
-                $values[$key] ??= '';
-            }
+    /**
+     * The values and the revision that describes them, from one lock interval.
+     *
+     * The settings page needs both, and needs them to agree: taking them from
+     * two separate locks lets a save land in between, and the form would then
+     * show one pair while its hidden token named another - submitting it
+     * unchanged would pass the fence and overwrite what landed.
+     *
+     * @return array{values: array<string, string>, revision: string}
+     */
+    public static function snapshot(): array
+    {
+        return self::withLock(static fn (): array => [
+            'values'   => self::storedValues(),
+            'revision' => self::revisionOfStored(),
+        ], LOCK_SH);
+    }
 
-            return $values;
-        }, LOCK_SH);
+    /**
+     * Every read on this side goes through the same parser the service uses,
+     * rather than parse_ini_file() or Unraid's parse_plugin_cfg(). Both of
+     * those run PHP's ini scanner, which turns an unquoted `true` into `1` and
+     * an unquoted `none` into nothing, while rc.docktail's reader keeps the
+     * text. Quoted values - all this plugin writes - come back identically
+     * either way, so nothing changes for a file the settings page wrote; what
+     * this removes is the disagreement over a hand-edited line, where the page
+     * would show a value the service is not using.
+     *
+     * parse_plugin_cfg() is not needed for its merge either: it layers
+     * default.cfg under the stored settings, which is what defaults() does
+     * here, from the same file.
+     *
+     * Callers hold the lock; this does not take it.
+     *
+     * @return array<string, string>
+     */
+    private static function storedValues(): array
+    {
+        $values = self::defaults();
+        $values = array_merge($values, self::readAsService(self::SETTINGS_FILE));
+        $values = array_merge($values, self::readAsService(self::CREDENTIALS_FILE));
+
+        foreach (self::SECRET_KEYS as $key) {
+            $values[$key] ??= '';
+        }
+
+        return $values;
     }
 
     /** @return array<string, string> */
@@ -350,23 +376,27 @@ final class Config
      * @param  array<string, string> $secrets
      * @param  string|null $expected the revision the form was composed
      *         against, or null to write regardless
-     * @return 'ok'|'stale'|'failed' stale means the stored pair changed since
-     *         then and nothing was written
+     * @return array{status: 'ok'|'stale'|'failed', revision: string} the
+     *         revision is the one this call leaves behind, taken before the
+     *         lock is released: computing it afterwards can hand the caller a
+     *         later writer's revision, and a form carrying that would pass the
+     *         fence and overwrite the save it belongs to. stale means the
+     *         stored pair changed since $expected and nothing was written.
      */
-    public static function write(array $settings, array $secrets, ?string $expected = null): string
+    public static function write(array $settings, array $secrets, ?string $expected = null): array
     {
-        return self::withLock(static function () use ($settings, $secrets, $expected): string {
+        return self::withLock(static function () use ($settings, $secrets, $expected): array {
             // Inside the lock, with the write: checking it anywhere else is
             // the same race in a different place.
             if ($expected !== null && $expected !== self::revisionOfStored()) {
-                return 'stale';
+                return ['status' => 'stale', 'revision' => self::revisionOfStored()];
             }
 
             // Inside the lock: two first-time saves would otherwise both see
             // the directory missing, and the one whose mkdir() lost would
             // report a failure for a directory that now exists.
             if ( ! is_dir(CONFIG_DIR) && ! @mkdir(CONFIG_DIR, 0755, true) && ! is_dir(CONFIG_DIR)) {
-                return 'failed';
+                return ['status' => 'failed', 'revision' => self::revisionOfStored()];
             }
 
             $staged = [];
@@ -378,13 +408,18 @@ final class Config
                 if ($tmp === false) {
                     self::discardStaged($staged);
 
-                    return 'failed';
+                    return ['status' => 'failed', 'revision' => self::revisionOfStored()];
                 }
 
                 $staged[$file] = [$tmp, $mode];
             }
 
-            return self::commitStaged($staged) ? 'ok' : 'failed';
+            $ok = self::commitStaged($staged);
+
+            return [
+                'status'   => $ok ? 'ok' : 'failed',
+                'revision' => self::revisionOfStored(),
+            ];
         });
     }
 
@@ -1277,7 +1312,8 @@ final class Config
      */
     public static function render(): string
     {
-        $cfg   = self::read();
+        $stored = self::snapshot();
+        $cfg    = $stored['values'];
         $token = csrfToken();
 
         $select = static function (string $name, array $options, string $selected, string $class = 'narrow'): string {
@@ -1303,7 +1339,7 @@ final class Config
 <!-- What the stored pair looked like when this form was rendered. apply.php
      refuses a save that was composed against an older one rather than letting
      it overwrite whatever landed since - see Config::write(). -->
-<input type="hidden" name="revision" id="docktail_revision" value="<?= h(self::revision()); ?>">
+<input type="hidden" name="revision" id="docktail_revision" value="<?= h($stored['revision']); ?>">
 
 <table class="unraid tablesorter"><thead><tr><td>DockTail Settings</td></tr></thead></table>
 

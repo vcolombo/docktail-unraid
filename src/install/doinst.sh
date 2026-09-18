@@ -52,6 +52,9 @@ php -d display_errors=stderr -r '
   foreach ($r["unparseable"] as $file) {
       echo "docktail: left $file alone - it contains a NUL byte, which neither the settings page nor the service can read, so both fall back to the shipped defaults for whatever it held. Repair the file (keep a copy first); pressing Apply would save those defaults over it.\n";
   }
+  foreach ($r["unreadable"] as $file) {
+      echo "docktail: could not read $file at all - it is still there, so nothing was changed, and the service is running on the shipped defaults for whatever it holds. Check the flash device.\n";
+  }
   exit($r["ok"] ? 0 : 1);
 ' 2> "$migration_err" \
   || {
