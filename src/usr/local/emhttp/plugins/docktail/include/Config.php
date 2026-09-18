@@ -544,6 +544,19 @@ final class Config
                 $staged[$file] = [$tmp, $mode];
             }
 
+            // Checked again here, against the staged bytes already on disk:
+            // this lock does not cover default.cfg, which an install replaces
+            // without taking it - and that file is in the revision because the
+            // form shows its values. Without this, an install landing between
+            // the first check and the commit would let a form built from the
+            // old defaults write them into docktail.cfg as explicit settings,
+            // masking the new ones. The window left is the commit itself.
+            if ($expected !== null && $expected !== self::revisionOfStored()) {
+                self::discardStaged($staged);
+
+                return ['status' => 'stale', 'revision' => self::revisionOfStored()];
+            }
+
             $ok = self::commitStaged($staged);
 
             return [
@@ -819,7 +832,11 @@ final class Config
                             // private now: the aside keeps the mode it had, so
                             // a failed chmod leaves the credential readable
                             // and claiming protection would be false.
-                            $report[@chmod($aside, 0600) ? 'quarantined' : 'exposed'][] = $aside;
+                            // The aside is named with why it was moved, so the
+                            // install log can say "cannot be read" rather than
+                            // claiming a NUL byte it has not seen.
+                            $report[@chmod($aside, 0600) ? 'quarantined' : 'exposed'][] =
+                                $read['unreadable'] ? $aside . ' (unreadable)' : $aside;
                             continue;
                         }
 
@@ -828,8 +845,8 @@ final class Config
                         // fix that - it only stops local readers - so this is
                         // an exposure whatever it returns.
                         @chmod($file, 0600);
-                        $report['exposed'][]     = $file;
-                        $report['unparseable'][] = $file;
+                        $report['exposed'][] = $file;
+                        $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
                         continue;
                     }
 

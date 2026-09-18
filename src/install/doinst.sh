@@ -44,7 +44,7 @@ php -d display_errors=stderr -r '
       echo "docktail: tightened $file to 0600 - it holds a credential and cannot be rewritten, so its contents are no longer readable by every local user\n";
   }
   foreach ($r["quarantined"] as $file) {
-      echo "docktail: moved the stored config aside to $file (0600) - it holds a credential and contains a byte no reader can use, and it sat in a file the Unraid Connect flash backup includes. Nothing was reading it; DockTail is on the shipped defaults. Repair that copy and press Apply.\n";
+      echo "docktail: moved the stored config aside to $file (0600) - it holds a credential and nothing can read it as config, and it sat in a file the Unraid Connect flash backup includes. Nothing was using it; DockTail is on the shipped defaults. Repair that copy and press Apply.\n";
   }
   foreach ($r["exposed"] as $file) {
       echo "docktail: $file holds a credential that could not be made private, or could not be moved out of the Unraid Connect flash backup - so it may be readable by other local users, or leave this server in a backup. Check its permissions and contents.\n";
