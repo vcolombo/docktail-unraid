@@ -38,9 +38,26 @@ switch ($action) {
         // nothing orders two of them, so a request whose answer never reached
         // the browser - a timeout, a dropped connection - could otherwise land
         // after the retry that replaced it and win.
-        $expected = isset($_POST['revision']) ? (string) $_POST['revision'] : null;
+        // Required, not optional: treating an absent field as "write anyway"
+        // would let any caller - including a settings fragment rendered before
+        // this field existed - skip the fence entirely.
+        if ( ! isset($_POST['revision']) || ! is_string($_POST['revision']) || $_POST['revision'] === '') {
+            http_response_code(409);
+            header('X-DockTail-Stale: 1');
+            echo "Not saved: this form was rendered by an older version of the settings page "
+                . "and cannot be checked against what is stored. Reload the tab and try again.\n";
+            break;
+        }
 
-        $result = Config::write($settings, $secrets, $expected);
+        $result = Config::write($settings, $secrets, (string) $_POST['revision']);
+        if ($result['status'] === 'contended') {
+            http_response_code(409);
+            header('X-DockTail-Stale: 1');
+            echo "Not saved: another save or the boot-time migration is holding the configuration "
+                . "lock, so this one could not be checked against what is stored. Try again.\n";
+            break;
+        }
+
         if ($result['status'] === 'stale') {
             http_response_code(409);
             header('X-DockTail-Stale: 1');

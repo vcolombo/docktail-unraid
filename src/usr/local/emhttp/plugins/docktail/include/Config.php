@@ -376,16 +376,30 @@ final class Config
      * @param  array<string, string> $secrets
      * @param  string|null $expected the revision the form was composed
      *         against, or null to write regardless
-     * @return array{status: 'ok'|'stale'|'failed', revision: string} the
+     * @return array{status: 'ok'|'stale'|'contended'|'failed', revision: string} the
      *         revision is the one this call leaves behind, taken before the
      *         lock is released: computing it afterwards can hand the caller a
      *         later writer's revision, and a form carrying that would pass the
      *         fence and overwrite the save it belongs to. stale means the
-     *         stored pair changed since $expected and nothing was written.
+     *         stored pair changed since $expected and nothing was written;
+     *         contended means the lock could not be taken, so the fence could
+     *         not be trusted and nothing was written either.
      */
     public static function write(array $settings, array $secrets, ?string $expected = null): array
     {
-        return self::withLock(static function () use ($settings, $secrets, $expected): array {
+        return self::withLock(static function (bool $locked) use ($settings, $secrets, $expected): array {
+            // A fence needs the lock. withLock() fails open after five
+            // seconds, and without it this comparison is a read of a pair
+            // another writer is in the middle of replacing: the form's
+            // revision can still match what is on disk while the holder is
+            // about to commit something else, and then this write lands on top
+            // of it. So a fenced write refuses instead. The migration, which
+            // passes no revision, keeps the fail-open behaviour - it runs at
+            // boot with nobody to retry it.
+            if ($expected !== null && ! $locked) {
+                return ['status' => 'contended', 'revision' => self::revisionOfStored()];
+            }
+
             // Inside the lock, with the write: checking it anywhere else is
             // the same race in a different place.
             if ($expected !== null && $expected !== self::revisionOfStored()) {
@@ -672,10 +686,21 @@ final class Config
                     if ($file === self::SETTINGS_FILE) {
                         $aside = sprintf('%s.unreadable.%s', $file, date('Ymd-His'));
                         if (@rename($file, $aside)) {
-                            @chmod($aside, 0600);
-                            $report['quarantined'][] = $aside;
+                            // Reported as quarantined only if it is actually
+                            // private now: the aside keeps the mode it had, so
+                            // a failed chmod leaves the credential readable
+                            // and claiming protection would be false.
+                            $report[@chmod($aside, 0600) ? 'quarantined' : 'exposed'][] = $aside;
                             continue;
                         }
+
+                        // The rename failed, so the credential is still under
+                        // the name the flash backup includes. A chmod does not
+                        // fix that - it only stops local readers - so this is
+                        // an exposure whatever it returns.
+                        @chmod($file, 0600);
+                        $report['exposed'][] = $file;
+                        continue;
                     }
 
                     // credentials.cfg is excluded from the backup already, so
@@ -1732,6 +1757,13 @@ function docktailApply() {
             var stillMine = state.generation === sentGeneration
                 && $('#docktail_revision').val() === sentRevision;
             if ( ! stillMine) {
+                // The form on screen is a different one, so its token and its
+                // clean/dirty state are its own. But its Apply was disarmed by
+                // this request - the render below sees state.request set and
+                // greys the fresh button - so it has to be put back, or an
+                // edit made in the new fragment cannot be submitted at all.
+                live.apply.prop('disabled', ! state.dirty && state.clean);
+
                 return;
             }
 
