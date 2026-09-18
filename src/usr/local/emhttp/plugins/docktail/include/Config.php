@@ -1091,6 +1091,19 @@ final class Config
                 $touched = @filemtime($stale);
                 if ($touched !== false && $touched < $cutoff) {
                     @unlink($stale);
+                    continue;
+                }
+
+                // Kept, because it may belong to a writer that is still going
+                // - but not left readable. A version of this plugin before the
+                // private creation wrote the body first and set the mode
+                // afterwards, so a crash could leave the whole credential at
+                // 0644 under the fixed name, and the grace period above is
+                // exactly how long that would sit there. A chmod costs the
+                // live writer nothing: its own temp is already 0600, and the
+                // mode is not what it is about to rename.
+                if ((@fileperms($stale) & 0777) !== 0600) {
+                    @chmod($stale, 0600);
                 }
             }
         }
