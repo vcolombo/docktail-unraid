@@ -920,9 +920,14 @@ final class Config
 
         $keys = implode('|', array_map('preg_quote', self::SECRET_KEYS));
 
-        // A non-empty value: KEY="" is the settings page's way of storing a
-        // field somebody cleared.
-        return preg_match('/^(?:' . $keys . ')="[^"\r\n]/m', $body) === 1;
+        // Deliberately looser than the reader: this decides whether to move a
+        // file out of the flash backup, so it has to catch a hand-edited line
+        // the reader would reject - leading space, lowercase key, spaces around
+        // the `=`, no quotes at all. A false positive costs a rename and a log
+        // line; a false negative leaves a credential in a file that gets
+        // uploaded. A non-empty value is still required: KEY="" is how the
+        // settings page stores a field somebody cleared.
+        return preg_match('/^[ \t]*(?:' . $keys . ')[ \t]*=[ \t]*"?[^"\r\n\t ]/im', $body) === 1;
     }
 
     /**

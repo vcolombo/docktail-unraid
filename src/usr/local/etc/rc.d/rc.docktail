@@ -248,15 +248,28 @@ start_docktail() {
     return 0
   fi
 
-  # Not visible, but the pidfile may still name a live child of a launcher that
-  # was killed between its fork and its exec - is_running() matches $BIN, and
-  # that child is still `nohup $BIN` or a script's interpreter. Launching a
-  # second one here is how two daemons end up reconciling the same tailnet, so
-  # this waits for it: if it surfaces, that is the start somebody already
-  # asked for, and if it does not, it is stopped before this one begins.
-  local adopted
+  # Not visible, but something may be on its way up. Two ways to find it: the
+  # pidfile, and - because the fork happens before the pidfile is written, so a
+  # launcher killed in between leaves no record at all - a scan for any root
+  # process that was launched with this binary as one of its arguments and has
+  # not exec'd yet. is_running() cannot see those: that child is still
+  # `nohup $BIN` or a script's interpreter. Launching a second one here is how
+  # two daemons end up reconciling the same tailnet.
+  local adopted candidate
   adopted=$(cat "$PIDFILE" 2> /dev/null)
-  if pid_is_docktail "$adopted"; then
+  if ! pid_is_docktail "$adopted"; then
+    adopted=""
+    for candidate in $("$PGREP" --ns $$ --euid root -f "$BIN" 2> /dev/null); do
+      [ "$candidate" = "$$" ] && continue
+      if pid_is_docktail "$candidate"; then
+        adopted="$candidate"
+        log "Found an untracked start as pid $adopted with no pidfile behind it."
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$adopted" ]; then
     log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
 
     local watch=0
@@ -381,9 +394,19 @@ pid_is_docktail() {
   *) return 1 ;;
   esac
 
-  case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null)" in
-  *"$BIN"*) return 0 ;;
-  esac
+  # The executable itself, once it has exec'd: /proc/<pid>/exe is the kernel's
+  # answer and cannot be spoofed by an argv.
+  [ "$(readlink -f "/proc/$pid/exe" 2> /dev/null)" = "$(readlink -f "$BIN" 2> /dev/null)" ] && return 0
+
+  # Before the exec there is no such answer - the process is still `nohup $BIN`
+  # or a script's interpreter - so the argv is all there is. Compared element by
+  # element rather than as a substring: an argument that *is* this path is a
+  # launch of it, where a command line that merely mentions it can be anything,
+  # including a root shell or a grep somebody left running.
+  local arg
+  while IFS= read -r -d '' arg; do
+    [ "$arg" = "$BIN" ] && return 0
+  done < "/proc/$pid/cmdline" 2> /dev/null
 
   return 1
 }
