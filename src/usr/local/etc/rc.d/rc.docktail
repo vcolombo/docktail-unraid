@@ -33,6 +33,12 @@ STOP_TIMEOUT=35
 # which is set the moment it execs.
 START_VISIBLE_TIMEOUT=5
 
+# argv[0] of the shell that writes the pidfile and then exec's DockTail. It is
+# how a process that has not exec'd yet can be identified as ours: an argv
+# element that happens to be the binary's path proves nothing - a `grep` has
+# one - but this string is in nothing else on the system.
+LAUNCH_MARKER="docktail-launcher"
+
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
 }
@@ -248,28 +254,14 @@ start_docktail() {
     return 0
   fi
 
-  # Not visible, but something may be on its way up. Two ways to find it: the
-  # pidfile, and - because the fork happens before the pidfile is written, so a
-  # launcher killed in between leaves no record at all - a scan for any root
-  # process that was launched with this binary as one of its arguments and has
-  # not exec'd yet. is_running() cannot see those: that child is still
-  # `nohup $BIN` or a script's interpreter. Launching a second one here is how
-  # two daemons end up reconciling the same tailnet.
-  local adopted candidate
+  # Not visible, but the pidfile may name a launcher that has not exec'd yet -
+  # the child writes that file itself before exec'ing, so it exists whenever the
+  # child does, however the launching shell died. is_running() cannot see those:
+  # the process is still the launcher shell. Launching a second one here is how
+  # two daemons end up reconciling the same tailnet, so this waits for it.
+  local adopted
   adopted=$(cat "$PIDFILE" 2> /dev/null)
-  if ! pid_is_docktail "$adopted"; then
-    adopted=""
-    for candidate in $("$PGREP" --ns $$ --euid root -f "$BIN" 2> /dev/null); do
-      [ "$candidate" = "$$" ] && continue
-      if pid_is_docktail "$candidate"; then
-        adopted="$candidate"
-        log "Found an untracked start as pid $adopted with no pidfile behind it."
-        break
-      fi
-    done
-  fi
-
-  if [ -n "$adopted" ]; then
+  if pid_is_docktail "$adopted"; then
     log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
 
     local watch=0
@@ -317,15 +309,26 @@ start_docktail() {
   export_if_set DOCKTAIL_CLOUD_KEY "${DOCKTAIL_CLOUD_KEY}"
 
   log "Starting DockTail: $BIN"
+  # The child writes its own pidfile and then exec's, so there is no window
+  # where a launched daemon exists with nothing naming it: this shell can be
+  # killed immediately after the fork and the record still appears. Doing it
+  # from here - `echo $! > $PIDFILE` after the `&` - left exactly that window,
+  # and closing it by scanning for processes whose argv mentions the binary
+  # meant a `grep` could be mistaken for a daemon.
+  #
+  # $LAUNCH_MARKER is the provenance: it is in the argv of our launcher and
+  # nothing else, so the pre-exec process can be identified as ours rather
+  # than guessed at from a command line.
+  #
   # 8 is the lifecycle lock, 9 the config lock. An inherited descriptor shares
   # the open file description that owns the lock, so a daemon holding a copy
   # keeps it alive: this shell's `flock -u` still releases it, but a shell
   # killed before reaching that line - an `at` job cut short, a boot that
   # times out - would leave the lock held for as long as DockTail runs. The
   # daemon has no business holding either.
-  nohup "$BIN" >> "$LOG" 2>&1 8>&- 9>&- &
+  nohup bash -c 'echo $$ > "$2"; exec "$1"' "$LAUNCH_MARKER" "$BIN" "$PIDFILE" \
+    >> "$LOG" 2>&1 8>&- 9>&- &
   started=$!
-  echo "$started" > "$PIDFILE"
 
   # Held until the daemon is visible to is_running(), because the lock is only
   # worth holding for that long: a stop taking the lock in the gap between the
@@ -394,19 +397,43 @@ pid_is_docktail() {
   *) return 1 ;;
   esac
 
-  # The executable itself, once it has exec'd: /proc/<pid>/exe is the kernel's
-  # answer and cannot be spoofed by an argv.
-  [ "$(readlink -f "/proc/$pid/exe" 2> /dev/null)" = "$(readlink -f "$BIN" 2> /dev/null)" ] && return 0
+  # Four ways to be DockTail, each of them positional rather than a substring -
+  # `grep "$BIN"` has the path in its argv and matches none of them, because
+  # there it is an operand rather than the thing being run.
+  #
+  # /proc/<pid>/exe first: it is the kernel's answer and cannot be arranged by
+  # a caller. It is not always readable, though - under binary emulation it
+  # comes back empty - so it cannot be the only rule.
+  local exe binary
+  exe=$(readlink -f "/proc/$pid/exe" 2> /dev/null)
+  binary=$(readlink -f "$BIN" 2> /dev/null)
+  [ -n "$exe" ] && [ -n "$binary" ] && [ "$exe" = "$binary" ] && return 0
 
-  # Before the exec there is no such answer - the process is still `nohup $BIN`
-  # or a script's interpreter - so the argv is all there is. Compared element by
-  # element rather than as a substring: an argument that *is* this path is a
-  # launch of it, where a command line that merely mentions it can be anything,
-  # including a root shell or a grep somebody left running.
-  local arg
+  local argv0="" argv1="" arg marked=0 named=0 index=0
   while IFS= read -r -d '' arg; do
-    [ "$arg" = "$BIN" ] && return 0
+    case "$index" in
+    0) argv0="$arg" ;;
+    1) argv1="$arg" ;;
+    esac
+    [ "$arg" = "$LAUNCH_MARKER" ] && marked=1
+    [ "$arg" = "$BIN" ] && named=1
+    index=$((index + 1))
   done < "/proc/$pid/cmdline" 2> /dev/null
+
+  # Our own launcher, before it exec's: the marker is in its argv[0] and in
+  # nothing else on the system, and the path it was given is there too.
+  [ "$marked" = 1 ] && [ "$named" = 1 ] && return 0
+
+  # The daemon itself, named by what it is running as.
+  [ "$argv0" = "$BIN" ] && return 0
+
+  # And $BIN as a script: the kernel runs the interpreter with the script as
+  # its first argument, which is that script running.
+  if [ "$argv1" = "$BIN" ]; then
+    case "$(basename -- "$argv0" 2> /dev/null)" in
+    bash | sh | dash | ash | ksh) return 0 ;;
+    esac
+  fi
 
   return 1
 }

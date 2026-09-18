@@ -913,7 +913,16 @@ final class Config
      */
     private static function holdsSecret(string $file): bool
     {
-        $body = (string) @file_get_contents($file);
+        $body = @file_get_contents($file);
+
+        // A file that exists and cannot be read has to be assumed to hold one:
+        // this decides whether to move it out of the flash backup, and "I could
+        // not look" is not "there is nothing there". A readable empty file is
+        // genuinely empty.
+        if ($body === false) {
+            return is_file($file);
+        }
+
         if ($body === '') {
             return false;
         }
@@ -927,7 +936,13 @@ final class Config
         // line; a false negative leaves a credential in a file that gets
         // uploaded. A non-empty value is still required: KEY="" is how the
         // settings page stores a field somebody cleared.
-        return preg_match('/^[ \t]*(?:' . $keys . ')[ \t]*=[ \t]*"?[^"\r\n\t ]/im', $body) === 1;
+        // The assignment anywhere on a line, with no requirement about the
+        // first byte of the value: `KEY=" secret"` is a credential, and so is
+        // one sitting after bytes no parser would accept. The single exception
+        // is an explicitly empty value, which is how the settings page stores
+        // a field somebody cleared - matching that would quarantine a file
+        // over a field that holds nothing.
+        return preg_match('/(?:' . $keys . ')[ \t]*=[ \t]*(?!""[ \t]*(?:$|[\r\n]))/im', $body) === 1;
     }
 
     /**
