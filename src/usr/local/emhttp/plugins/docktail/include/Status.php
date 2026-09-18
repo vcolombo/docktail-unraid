@@ -775,9 +775,12 @@ function docktailControl(action) {
         url: $('#docktail_control').attr('action'),
         type: 'POST',
         data: $('#docktail_control').serialize(),
-        // Comfortably beyond the drain window, so a slow stop is not reported
-        // as a failure while it is still working.
-        timeout: 90000
+        // Beyond the endpoint's whole budget, not just the drain window: a
+        // stop arriving behind a restart waits for the lifecycle lock (65s)
+        // before its own work (a 35s drain, plus a start), and apply.php
+        // allows 150s for that. Reporting a failure while the server is still
+        // working is how the page ends up disagreeing with the daemon.
+        timeout: 160000
     }).done(function(data) {
         // The endpoint's first line is the answer; the rest is rc output.
         message = String(data).split('\n')[0].trim() || 'Done.';

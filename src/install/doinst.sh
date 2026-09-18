@@ -43,6 +43,9 @@ php -d display_errors=stderr -r '
   foreach ($r["protected"] as $file) {
       echo "docktail: tightened $file to 0600 - it holds a credential and cannot be rewritten, so its contents are no longer readable by every local user\n";
   }
+  foreach ($r["quarantined"] as $file) {
+      echo "docktail: moved the stored config aside to $file (0600) - it holds a credential and contains a byte no reader can use, and it sat in a file the Unraid Connect flash backup includes. Nothing was reading it; DockTail is on the shipped defaults. Repair that copy and press Apply.\n";
+  }
   foreach ($r["exposed"] as $file) {
       echo "docktail: $file holds a credential, cannot be parsed, and could not even be made private - the credential is readable by every local user. Fix its permissions and repair the file.\n";
   }

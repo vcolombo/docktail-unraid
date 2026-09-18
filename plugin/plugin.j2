@@ -56,7 +56,7 @@ mkdir -p {{ configDirectory }}
 # Before upgradepkg, not after: the package's doinst.sh runs the config
 # migration, which stages those temps - so the patterns have to be on the flash
 # before anything can write one.
-printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n' > {{ configDirectory }}/.gitignore
+printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n*.unreadable.*\n' > {{ configDirectory }}/.gitignore
 
 upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
 

@@ -91,11 +91,18 @@ switch ($action) {
         // Direct, not deferred: an explicit stop must wait for DockTail to
         // withdraw its Tailscale Services before the request returns.
         //
-        // rc.docktail allows a 35s drain, which exceeds the default execution
-        // limit, so raise it. Without this a slow stop could be cut off
-        // mid-drain, leaving Services advertised with nothing behind them.
-        @set_time_limit(60);
+        // The budget is the whole thing rc.docktail can legitimately spend:
+        // waiting for the lifecycle lock (RC_LOCK_WAIT, 65s - a restart can
+        // hold it for a stop, a config-lock wait and a visibility wait) and
+        // then doing the work (a 35s drain, plus a start). Cut this short and
+        // the request reports a failure for an action that is still running,
+        // which is how Services end up advertised with nothing behind them
+        // while the page says the stop failed.
+        @set_time_limit(150);
 
+        // $code initialised to a failure: @exec() leaves it untouched if it
+        // cannot run at all, and a stop that never ran must not read as one
+        // that succeeded.
         $output = [];
         $code   = 1;
         @exec(escapeshellarg(RC_SCRIPT) . ' ' . escapeshellarg($action) . ' 2>&1', $output, $code);

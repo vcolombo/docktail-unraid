@@ -71,7 +71,7 @@ mkdir -p /boot/config/plugins/docktail
 # Before upgradepkg, not after: the package's doinst.sh runs the config
 # migration, which stages those temps - so the patterns have to be on the flash
 # before anything can write one.
-printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n' > /boot/config/plugins/docktail/.gitignore
+printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n*.unreadable.*\n' > /boot/config/plugins/docktail/.gitignore
 
 upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
 

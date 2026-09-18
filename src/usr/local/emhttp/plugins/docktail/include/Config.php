@@ -580,6 +580,7 @@ final class Config
      * @return array{ok: bool, dropped: list<string>, superseded: list<string>,
      *         stranded: list<string>, unremoved: list<string>, moved: list<string>,
      *         protected: list<string>, exposed: list<string>,
+     *         quarantined: list<string>,
      *         ignored: list<string>, malformed: list<string>,
      *         unparseable: list<string>}
      *         ok is false only when a file that needed converting could not be
@@ -590,7 +591,9 @@ final class Config
      *         the flash backup; moved names secrets
      *         relocated into the 0600 file; protected names files tightened to
      *         0600 because they hold a credential and cannot be rewritten;
-     *         exposed names ones where even that failed; ignored names keys
+     *         exposed names ones where even that failed; quarantined names
+     *         settings files moved aside because they hold a credential, cannot
+     *         be read, and are part of the flash backup where they were; ignored names keys
      *         nothing reads; malformed names lines the service skips on syntax
      *         alone; unparseable names files PHP could not parse at all
      */
@@ -611,6 +614,7 @@ final class Config
                 'moved'       => [],
                 'protected'   => [],
                 'exposed'     => [],
+                'quarantined' => [],
                 'ignored'     => [],
                 'malformed'   => [],
                 'unparseable' => [],
@@ -652,19 +656,32 @@ final class Config
                     $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
                     $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
 
-                    // The secret cannot be moved out of a file that cannot be
-                    // rewritten - rewriting it is what would lose the lines
-                    // PHP choked on. The exposure is the file's mode, not its
-                    // contents, so the mode is what changes: both readers of
-                    // this file run as root.
-                    if (self::holdsSecret($file)) {
-                        // A credential left readable because even the chmod
-                        // failed is the loudest thing this function can find,
-                        // and saying nothing about it was the bug.
-                        $key = @chmod($file, 0600) ? 'protected' : 'exposed';
-
-                        $report[$key][] = $file;
+                    if ( ! self::holdsSecret($file)) {
+                        continue;
                     }
+
+                    // A credential in a file nothing can read, so it cannot be
+                    // moved out line by line - and for docktail.cfg a chmod is
+                    // not enough either, because that file is part of Unraid
+                    // Connect's flash backup whatever its mode. So the file is
+                    // moved aside instead: renamed, kept, 0600, under a name
+                    // the backup ignores and the temp sweep does not touch.
+                    // Nothing is lost that was not already lost - neither
+                    // reader could use a line of it - and the person has the
+                    // file to repair.
+                    if ($file === self::SETTINGS_FILE) {
+                        $aside = sprintf('%s.unreadable.%s', $file, date('Ymd-His'));
+                        if (@rename($file, $aside)) {
+                            @chmod($aside, 0600);
+                            $report['quarantined'][] = $aside;
+                            continue;
+                        }
+                    }
+
+                    // credentials.cfg is excluded from the backup already, so
+                    // the mode is the whole exposure there - and a failed
+                    // chmod is the loudest thing this function can find.
+                    $report[@chmod($file, 0600) ? 'protected' : 'exposed'][] = $file;
 
                     continue;
                 }
@@ -937,6 +954,7 @@ final class Config
             'moved'       => [],
             'protected'   => $report['protected'],
             'exposed'     => $report['exposed'],
+            'quarantined' => $report['quarantined'],
             'ignored'     => [],
             'malformed'   => [],
             'unparseable' => $report['unparseable'],
@@ -1561,6 +1579,11 @@ window.docktailApplyState = window.docktailApplyState || {
     // the fragment is injected, and an unchanged form that can be submitted is
     // a restart, and a write over whatever another tab saved since.
     clean: false,
+    // Bumped by every render. A POST records the generation it was composed
+    // from, so its answer can tell whether the form it is about to write to is
+    // still the same form - an AJAX fragment can be replaced mid-flight, and
+    // another tab can save in the meantime.
+    generation: 0,
     bound: false
 };
 
@@ -1570,6 +1593,8 @@ window.docktailApplyState = window.docktailApplyState || {
 $(function() {
     var state = window.docktailApplyState;
     var nodes = docktailApplyNodes();
+
+    state.generation++;
 
     if (state.unknown) {
         docktailApplyUnknown(nodes, 'A previous save did not report back and may still be in '
@@ -1668,6 +1693,11 @@ function docktailApply() {
     out.removeClass('docktail-apply-error').text('Saving...');
     apply.prop('disabled', true);
 
+    // What this POST is answering for: the render it came from and the fence
+    // token it carried.
+    var sentGeneration = state.generation;
+    var sentRevision = $('#docktail_revision').val();
+
     // Bounded like the Status tab's POSTs: Apply is disarmed until an answer
     // arrives, so a request left pending must time out or the form stays dead.
     state.request = $.ajax({
@@ -1687,16 +1717,29 @@ function docktailApply() {
             // rearm Apply, because the person has a value to correct and would
             // otherwise have to reload the tab to resubmit it. An edit made
             // while this was in flight rearms it for the same reason.
-            // The pair this form now matches, so a second Apply without a
-            // reload is not refused as composed against an older one.
+            var refused = xhr.getResponseHeader('X-DockTail-Refused');
+            live.out.toggleClass('docktail-apply-error', !!refused)
+                .text(String(data).trim() || 'Settings saved.');
+
+            // The form on screen may not be the form that submitted this: the
+            // fragment can be re-rendered mid-flight, and it comes back with
+            // the values and the token that were stored at *its* render. Only
+            // the submitting form may be advanced - writing this answer's
+            // token onto a newer one would pair a newer token with older
+            // fields, which is how a later edit overwrites a save that already
+            // landed. A newer form needs no help: its token is already current
+            // or its own save will be refused.
+            var stillMine = state.generation === sentGeneration
+                && $('#docktail_revision').val() === sentRevision;
+            if ( ! stillMine) {
+                return;
+            }
+
             var revision = xhr.getResponseHeader('X-DockTail-Revision');
             if (revision) {
                 $('#docktail_revision').val(revision);
             }
 
-            var refused = xhr.getResponseHeader('X-DockTail-Refused');
-            live.out.toggleClass('docktail-apply-error', !!refused)
-                .text(String(data).trim() || 'Settings saved.');
             state.clean = ! refused && ! state.dirty;
             live.apply.prop('disabled', state.clean);
         })
