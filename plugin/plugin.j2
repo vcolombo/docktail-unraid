@@ -58,8 +58,11 @@ mkdir -p {{ configDirectory }}
 # before anything can write one.
 printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n*.unreadable.*\n' > {{ configDirectory }}/.gitignore
 
-upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
-
+# Before upgradepkg, like the ignore file: the package's doinst.sh runs the
+# migration, which records what the pair looked like - so the pair has to be
+# complete before it looks, or the next boot reports a change that was just
+# this install finishing.
+#
 # noclobber, not a test-then-create: an Apply can land between the two and this
 # would then copy /dev/null over credentials it just saved. `set -C` makes the
 # redirection itself fail when the file exists, which is one atomic syscall.
@@ -69,6 +72,9 @@ upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
     : > {{ configDirectory }}/credentials.cfg
 ) 2> /dev/null || true
 chmod 0600 {{ configDirectory }}/credentials.cfg
+
+upgradepkg --install-new {{ configDirectory }}/{{ packageFile }}
+
 
 # Drop the other release channel so both are never installed at once.
 rm -f /boot/config/plugins/{{ otherChannel }}.plg

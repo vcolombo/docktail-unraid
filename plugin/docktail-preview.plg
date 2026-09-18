@@ -73,8 +73,11 @@ mkdir -p /boot/config/plugins/docktail
 # before anything can write one.
 printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n*.unreadable.*\n' > /boot/config/plugins/docktail/.gitignore
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
-
+# Before upgradepkg, like the ignore file: the package's doinst.sh runs the
+# migration, which records what the pair looked like - so the pair has to be
+# complete before it looks, or the next boot reports a change that was just
+# this install finishing.
+#
 # noclobber, not a test-then-create: an Apply can land between the two and this
 # would then copy /dev/null over credentials it just saved. `set -C` makes the
 # redirection itself fail when the file exists, which is one atomic syscall.
@@ -84,6 +87,9 @@ upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.0
     : > /boot/config/plugins/docktail/credentials.cfg
 ) 2> /dev/null || true
 chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
+
 
 # Drop the other release channel so both are never installed at once.
 rm -f /boot/config/plugins/docktail.plg

@@ -41,18 +41,6 @@ final class Config
      */
     public const DEFAULTS_FILE = PLUGIN_ROOT . '/default.cfg';
 
-    /**
-     * The revision of the pair as it was last committed whole.
-     *
-     * Written after both renames, so a boot that finds it disagreeing with
-     * what is on disk has found a pair that was interrupted between them -
-     * a power loss or a flash failure mid-save, which no amount of ordering
-     * inside one process can prevent. It cannot repair that: which half is
-     * right is not knowable from here. It can say so, which is the difference
-     * between a config somebody can look at and one that silently mixes two
-     * saves.
-     */
-    public const PAIR_MARKER = CONFIG_DIR . '/.pair';
 
     // /var/run, not /tmp and not the flash: /tmp is world-writable, so any
     // local process could create this file first and hold it, and a blocking
@@ -436,6 +424,31 @@ final class Config
      * stale, or Apply would write the old ones back into docktail.cfg and
      * mask the new ones.
      */
+
+    /**
+     * @param  list<string> $files
+     * @return string '' when one of them exists and cannot be read
+     */
+    private static function revisionOf(array $files): string
+    {
+        $parts = [];
+        foreach ($files as $file) {
+            $body = @file_get_contents($file);
+            if ($body === false) {
+                if (is_file($file)) {
+                    return '';
+                }
+
+                $parts[] = 'absent';
+                continue;
+            }
+
+            $parts[] = hash('sha256', $body);
+        }
+
+        return substr(hash('sha256', implode('.', $parts)), 0, 16);
+    }
+
     private static function revisionOfStored(string|false|null $defaultsBody = null): string
     {
         // The defaults are hashed from the bytes the caller read, when it read
@@ -531,19 +544,11 @@ final class Config
                 $staged[$file] = [$tmp, $mode];
             }
 
-            $ok       = self::commitStaged($staged);
-            $revision = self::revisionOfStored();
-
-            // After both renames, never between them: that is what makes it
-            // evidence. A boot that finds this disagreeing with the files has
-            // found a save that was interrupted.
-            if ($ok && $revision !== '') {
-                self::recordPair($revision);
-            }
+            $ok = self::commitStaged($staged);
 
             return [
                 'status'   => $ok ? 'ok' : 'failed',
-                'revision' => $revision,
+                'revision' => self::revisionOfStored(),
             ];
         });
     }
@@ -744,17 +749,7 @@ final class Config
                 'malformed'   => [],
                 'unparseable' => [],
                 'unreadable'  => [],
-                'torn'        => [],
             ];
-
-            // Before anything is rewritten: a pair that does not match the
-            // marker was interrupted between its two renames - a power loss
-            // or a flash failure during a save. This cannot know which half
-            // is newer, so it says so and changes nothing on that account.
-            $revisionOnDisk = self::revisionOfStored();
-            if ($revisionOnDisk !== '' && ! self::pairLooksWhole($revisionOnDisk)) {
-                $report['torn'][] = self::SETTINGS_FILE;
-            }
             $staged = [];
             // What each staged file would report, held back until it lands.
             $pending = [];
@@ -939,14 +934,6 @@ final class Config
                 return self::migrationFailed($report);
             }
 
-            // Whatever it was before, the pair on disk now is one this code
-            // wrote, so the marker is brought up to date - otherwise the next
-            // boot would report the same interruption for ever.
-            $after = self::revisionOfStored();
-            if ($after !== '') {
-                self::recordPair($after);
-            }
-
             foreach ($pending as [$lost, $unknown, $broken]) {
                 $report['dropped']   = array_merge($report['dropped'], $lost);
                 $report['ignored']   = array_merge($report['ignored'], $unknown);
@@ -1104,35 +1091,6 @@ final class Config
             && preg_match('/(?:' . $keys . ')[ \t]*=/im', $bodies[1]) === 1;
     }
 
-    /** Note the revision of a pair that landed whole. */
-    private static function recordPair(string $revision): void
-    {
-        $tmp = self::stageBytes(self::PAIR_MARKER, $revision . "\n", 0644);
-        if ($tmp === false) {
-            return;
-        }
-
-        if ( ! @rename($tmp, self::PAIR_MARKER)) {
-            @unlink($tmp);
-        }
-    }
-
-    /**
-     * Was the pair on disk last written whole?
-     *
-     * Only false when there is a marker and it disagrees: no marker at all is
-     * an install that has never saved, or one that predates this, and guessing
-     * "torn" there would cry wolf on every upgrade.
-     */
-    private static function pairLooksWhole(string $revision): bool
-    {
-        $recorded = @file_get_contents(self::PAIR_MARKER);
-        if ($recorded === false) {
-            return true;
-        }
-
-        return trim($recorded) === $revision;
-    }
 
     /**
      * Remove staged files nobody is going to commit.
@@ -1234,7 +1192,6 @@ final class Config
             'malformed'   => [],
             'unparseable' => $report['unparseable'],
             'unreadable'  => $report['unreadable'],
-            'torn'        => $report['torn'],
         ];
     }
 
@@ -1357,6 +1314,18 @@ final class Config
      * just failed a rename, that is not unlikely. There is nothing below it to
      * fall back on; the caller reports a failed save either way, and the
      * settings page then shows what is actually stored.
+     *
+     * What this is atomic against is everything inside one process: a failed
+     * write, a failed rename, a rollback, a worker that dies. What it is not
+     * atomic against is the machine stopping between the two renames - a power
+     * loss during an Apply can leave the new settings beside the previous
+     * credentials. Nothing short of a journal fixes that, which is more
+     * machinery than two files of a few hundred bytes deserve, and a marker
+     * file was tried and removed: it cannot tell an interrupted save from a
+     * hand-edited docktail.cfg, which is a thing people do and this code
+     * supports, so it reported the supported case as a fault. The observable
+     * consequence is that the settings page shows the mixed pair and an Apply
+     * writes a consistent one.
      *
      * @param array<string, array{string, int}> $staged destination => [staged path, mode]
      */
