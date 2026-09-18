@@ -231,6 +231,27 @@ export_if_set() {
   return 0
 }
 
+# cleanup_pattern - everything a launch of $BIN can look like, for the kills
+# that have to catch all of it.
+#
+# Two shapes, because $BIN can be either kind of file: a compiled binary is
+# exec'd directly and is its own argv[0], where a script is run by its
+# interpreter, which becomes argv[0] with the script after it. DockTail ships
+# as a binary, so is_running() - which answers "is the daemon up" - keeps the
+# anchored form that describes it. These kills are the other question: what
+# might still be running that this start or stop is responsible for, where
+# missing something leaves a second daemon behind, and pid_is_docktail()
+# already accepts both shapes.
+#
+# The path is escaped because this is a regular expression: a dot in a
+# directory name would otherwise match anything.
+cleanup_pattern() {
+  local escaped
+  escaped=$(printf '%s' "$BIN" | sed -e 's/[][\.^$*+?(){}|\/]/\\&/g')
+
+  printf '(^%s( |$))|(^[^ ]*sh %s( |$))' "$escaped" "$escaped"
+}
+
 is_running() {
   "$PGREP" --ns $$ --euid root -f "^${BIN}" 1> /dev/null 2> /dev/null
 }
@@ -313,7 +334,7 @@ start_docktail() {
 
       # And if it exec'd but is still not visible - a $BIN that is a script,
       # mid-interpreter - the anchored name catches what the marker cannot.
-      "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+      "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
     fi
   fi
 
@@ -396,7 +417,7 @@ start_docktail() {
       # And by its own name, in case it exec'd during the wait: the marker
       # lives in the launcher's argv and is gone the moment DockTail replaces
       # it, so the two patterns cover the two halves of that handover.
-      "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+      "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
     else
       log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
     fi
@@ -562,7 +583,7 @@ stop_docktail() {
   fi
 
   log "Stopping DockTail, waiting up to ${STOP_TIMEOUT}s for service cleanup."
-  "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+  "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
 
   local waited=0
   while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
@@ -576,7 +597,7 @@ stop_docktail() {
   done
 
   log "DockTail did not exit within ${STOP_TIMEOUT}s, sending SIGKILL (advertised services may be left behind)."
-  "$PKILL" --ns $$ --euid root -KILL -f "^${BIN}" 2> /dev/null
+  "$PKILL" --ns $$ --euid root -KILL -f "$(cleanup_pattern)" 2> /dev/null
   rm -f "$PIDFILE"
   return 0
 }
