@@ -322,12 +322,17 @@ start_docktail() {
   #
   # 8 is the lifecycle lock, 9 the config lock. An inherited descriptor shares
   # the open file description that owns the lock, so a daemon holding a copy
-  # keeps it alive: this shell's `flock -u` still releases it, but a shell
-  # killed before reaching that line - an `at` job cut short, a boot that
-  # times out - would leave the lock held for as long as DockTail runs. The
-  # daemon has no business holding either.
-  nohup bash -c 'echo $$ > "$2"; exec "$1"' "$LAUNCH_MARKER" "$BIN" "$PIDFILE" \
-    >> "$LOG" 2>&1 8>&- 9>&- &
+  # keeps it alive - which is useful for exactly as long as the handshake
+  # below, and unacceptable afterwards.
+  # The child inherits the lifecycle lock and closes it *after* writing the
+  # pidfile, not before: that is what closes the last of this window. If this
+  # shell is killed between the fork and the child's write, the lock is still
+  # held - by the child - so a concurrent start waits rather than launching a
+  # second daemon, and by the time it gets the lock the pidfile exists. The
+  # daemon itself must not hold either descriptor, so the child drops both in
+  # the same breath as its exec.
+  nohup bash -c 'echo $$ > "$2"; exec 8>&- 9>&-; exec "$1"' \
+    "$LAUNCH_MARKER" "$BIN" "$PIDFILE" >> "$LOG" 2>&1 &
   started=$!
 
   # Held until the daemon is visible to is_running(), because the lock is only

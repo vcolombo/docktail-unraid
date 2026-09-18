@@ -139,14 +139,29 @@ final class Config
      * show one pair while its hidden token named another - submitting it
      * unchanged would pass the fence and overwrite what landed.
      *
-     * @return array{values: array<string, string>, revision: string}
+     * @return array{values: array<string, string>, revision: string, locked: bool}
+     *         revision is '' when the lock could not be taken, which makes any
+     *         save from the rendered form refuse rather than risk overwriting
+     *         whatever the lock holder is committing
      */
     public static function snapshot(): array
     {
-        return self::withLock(static fn (): array => [
-            'values'   => self::storedValues(),
-            'revision' => self::revisionOfStored(),
-        ], LOCK_SH);
+        return self::withLock(static function (bool $locked): array {
+            $values = self::storedValues();
+
+            // Without the lock the two reads are not one snapshot: a save can
+            // land between them and the form would carry the old values with
+            // the new revision - which would then pass the fence and overwrite
+            // that save. So the revision is withheld rather than guessed, and
+            // an empty one is refused by apply.php with the reload message.
+            // The page still renders: showing the settings is useful even when
+            // saving them has to wait for whatever holds the lock.
+            return [
+                'values'   => $values,
+                'revision' => $locked ? self::revisionOfStored() : '',
+                'locked'   => $locked,
+            ];
+        }, LOCK_SH);
     }
 
     /**
