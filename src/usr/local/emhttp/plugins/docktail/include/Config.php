@@ -628,6 +628,17 @@ final class Config
         // enough for another local user to open it read-only and hold a shared
         // lock - which pushes every writer past the wait below and out to the
         // fails-open path, the serialisation gone. rc.docktail does the same.
+        // What is at the path, before opening it: fopen() on a FIFO blocks
+        // in write mode until a reader appears, which would hang every config
+        // read and every save - before flock(), before its timeout, before
+        // the fail-open path that exists precisely so this code never waits
+        // on a lock forever. Absent is fine, and so is a regular file.
+        if (file_exists(self::LOCK_FILE) && ! is_file(self::LOCK_FILE)) {
+            self::logUnlocked(self::LOCK_FILE . ' is not a regular file', $operation, $consequence);
+
+            return $work(false);
+        }
+
         $previousUmask = umask(0077);
         $handle = @fopen(self::LOCK_FILE, 'c');
         umask($previousUmask);

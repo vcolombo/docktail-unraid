@@ -183,6 +183,18 @@ CONFIG_LOCK="/var/run/docktail-config.lock"
 # the same thing whichever side hits it.
 CONFIG_LOCK_WAIT=5
 
+# lock_path_usable PATH - is it safe to open this as a lock file?
+#
+# A redirection opens whatever is at the path, and opening a FIFO for writing
+# blocks until a reader appears - before flock, before its timeout, before any
+# diagnostic. A named pipe left at a lock path would therefore hang the thing
+# the bounded wait below exists to keep bounded: load_config() during boot, or
+# every start and stop. Absent is fine (the redirection creates it) and so is a
+# regular file; anything else takes the fail-open path with a line in the log.
+lock_path_usable() {
+  [ ! -e "$1" ] || [ -f "$1" ]
+}
+
 load_config() {
   local file locked=0 opened=1 previous_umask
 
@@ -197,8 +209,12 @@ load_config() {
     # every later start and stop diagnostic.
     previous_umask=$(umask)
     umask 077
-    { exec 9>> "$CONFIG_LOCK"; } 2> /dev/null
-    opened=$?
+    if lock_path_usable "$CONFIG_LOCK"; then
+      { exec 9>> "$CONFIG_LOCK"; } 2> /dev/null
+      opened=$?
+    else
+      opened=1
+    fi
     umask "$previous_umask"
 
     # The umask only covers creating it; an existing one from an older
@@ -210,7 +226,7 @@ load_config() {
     [ "$opened" -eq 0 ] && [ ! -L "$CONFIG_LOCK" ] && chmod 600 "$CONFIG_LOCK" 2> /dev/null
 
     if [ "$opened" -ne 0 ]; then
-      log "Reading the config without the write lock: $CONFIG_LOCK could not be opened. A save landing in the middle of this read could be picked up half-applied."
+      log "Reading the config without the write lock: $CONFIG_LOCK could not be opened, or is not a regular file. A save landing in the middle of this read could be picked up half-applied."
     elif flock -s -w "$CONFIG_LOCK_WAIT" 9 2> /dev/null; then
       locked=1
     else
@@ -722,8 +738,12 @@ serialised() {
     # redirection inside a brace group so it does not apply to this shell.
     previous_umask=$(umask)
     umask 077
-    { exec 8>> "$RC_LOCK"; } 2> /dev/null
-    opened=$?
+    if lock_path_usable "$RC_LOCK"; then
+      { exec 8>> "$RC_LOCK"; } 2> /dev/null
+      opened=$?
+    else
+      opened=1
+    fi
     umask "$previous_umask"
 
     # Not through a symlink: chmod follows one, so a link left at this
@@ -733,7 +753,7 @@ serialised() {
     [ "$opened" -eq 0 ] && [ ! -L "$RC_LOCK" ] && chmod 600 "$RC_LOCK" 2> /dev/null
 
     if [ "$opened" -ne 0 ]; then
-      log "Running $action without the lifecycle lock: $RC_LOCK could not be opened. Another start or stop landing together with this one could leave two daemons."
+      log "Running $action without the lifecycle lock: $RC_LOCK could not be opened, or is not a regular file. Another start or stop landing together with this one could leave two daemons."
     elif take_lifecycle_lock; then
       locked=1
       printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
