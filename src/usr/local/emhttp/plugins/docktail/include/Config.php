@@ -273,31 +273,47 @@ final class Config
      *         kept apart from keys it reads but does not recognise, because
      *         the two need different things said about them
      */
-    private static function parseAsReader(string $file): array
+    /**
+     * file_get_contents() for a path somebody can replace with something that
+     * is not a file.
+     *
+     * Reading a FIFO blocks until a writer appears; a character device reads
+     * until the read fails. Either one hangs a settings page render, an Apply
+     * or the boot migration - and these paths live in a directory on the
+     * flash that the installer deliberately leaves alone when it finds
+     * something odd there, so "odd" is a state the readers have to survive
+     * rather than one they can assume away.
+     *
+     * An existing non-regular path reads as false, which every caller already
+     * handles: it is the same answer as a file that cannot be read. A dangling
+     * symlink gets there on its own, since there is nothing to open.
+     *
+     * @return string|false
+     */
+    private static function readIfRegular(string $file)
     {
-        // What is at the path, before opening it. file_get_contents() on a
-        // FIFO blocks until something writes to it, and on a character device
-        // it reads until the read fails - either one hangs a settings page
-        // render or an Apply, from a path the installer deliberately leaves
-        // alone when it is not a regular file. rc.docktail refuses the same
-        // thing with [ -f ], and the two readers have to agree about what is
-        // readable or the page and the service disagree about the config.
-        //
-        // Reported as unreadable, which is exactly what it is: the file is
-        // there, nothing was read, and the caller must not treat that as an
-        // empty config.
         if (file_exists($file) && ! is_file($file)) {
-            return ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => true];
+            return false;
         }
 
-        $raw = @file_get_contents($file);
+        return @file_get_contents($file);
+    }
 
-        // A file that exists and cannot be read is not an empty file. It is
-        // its own answer, because the difference matters twice: the settings
-        // page would otherwise show defaults for a config that is still there,
-        // and the migration would compare its rendering against "", see
-        // nothing worth writing, and report success for a file it never read.
-        if ($raw === false && is_file($file)) {
+    private static function parseAsReader(string $file): array
+    {
+        $raw = self::readIfRegular($file);
+
+        // A path that exists and gave nothing is not an empty file. It is its
+        // own answer, because the difference matters twice: the settings page
+        // would otherwise show defaults for a config that is still there, and
+        // the migration would compare its rendering against "", see nothing
+        // worth writing, and report success for a file it never read.
+        //
+        // file_exists() rather than is_file() so that a FIFO or a device at
+        // this path - which readIfRegular() refuses to open - is unreadable
+        // rather than absent, and the caller leaves it alone instead of
+        // rewriting over it.
+        if ($raw === false && file_exists($file)) {
             return ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => true];
         }
 
@@ -448,9 +464,9 @@ final class Config
     {
         $parts = [];
         foreach ($files as $file) {
-            $body = @file_get_contents($file);
+            $body = self::readIfRegular($file);
             if ($body === false) {
-                if (is_file($file)) {
+                if (file_exists($file)) {
                     return '';
                 }
 
@@ -477,9 +493,9 @@ final class Config
         $parts = [$defaults === false ? 'absent' : hash('sha256', $defaults)];
 
         foreach ([self::SETTINGS_FILE, self::CREDENTIALS_FILE] as $file) {
-            $body = @file_get_contents($file);
+            $body = self::readIfRegular($file);
             if ($body === false) {
-                if (is_file($file)) {
+                if (file_exists($file)) {
                     return '';
                 }
 
@@ -861,9 +877,11 @@ final class Config
                     continue;
                 }
 
-                $read = is_file($file)
-                    ? self::parseAsReader($file)
-                    : ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => false];
+                // Every shape through the same reader: an is_file() gate here
+                // called a FIFO absent, and "absent" means usable - which
+                // ended with commitStaged() doing a plain read of it and the
+                // whole boot migration blocking on a pipe nobody was writing.
+                $read = self::parseAsReader($file);
 
                 // Reported and left alone: a file holding a NUL is the one
                 // file neither reader will take a line from, and one that
@@ -876,6 +894,18 @@ final class Config
                 // this same reader, that distinction described nothing.
                 if ($read['nul'] || $read['unreadable']) {
                     $state[$file] = ['values' => [], 'malformed' => [], 'usable' => false];
+
+                    // A FIFO, a socket, a device: reported and then left,
+                    // exactly like a link. The quarantine below renames the
+                    // file aside, and moving something a person deliberately
+                    // put there is not this function's decision - nor would
+                    // it protect anything, since a pipe holds no bytes for a
+                    // backup to pick up.
+                    if (file_exists($file) && ! is_file($file)) {
+                        $report['unreadable'][] = $file;
+
+                        continue;
+                    }
 
                     // Named as left alone only if it is going to be: the
                     // quarantine below moves it, and reporting both would be
@@ -1002,7 +1032,7 @@ final class Config
                     $values[$key] = $cleaned;
                 }
 
-                if (self::renderBody($values) === (string) @file_get_contents($file)) {
+                if (self::renderBody($values) === (string) self::readIfRegular($file)) {
                     continue;
                 }
 
@@ -1154,14 +1184,14 @@ final class Config
      */
     private static function holdsSecret(string $file): bool
     {
-        $body = @file_get_contents($file);
+        $body = self::readIfRegular($file);
 
         // A file that exists and cannot be read has to be assumed to hold one:
         // this decides whether to move it out of the flash backup, and "I could
         // not look" is not "there is nothing there". A readable empty file is
         // genuinely empty.
         if ($body === false) {
-            return is_file($file);
+            return file_exists($file);
         }
 
         if ($body === '') {
@@ -1461,7 +1491,7 @@ final class Config
         // the 0644 the new one was going to have.
         $previous = [];
         foreach (array_keys($staged) as $file) {
-            $was = @file_get_contents($file);
+            $was = self::readIfRegular($file);
 
             // Absent and unreadable are different answers. null means there
             // was no file, and a rollback deletes what this commit created;
