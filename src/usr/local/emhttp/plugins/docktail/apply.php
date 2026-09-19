@@ -127,7 +127,8 @@ switch ($action) {
 
         // The exit status is not the whole answer, and neither is the state
         // on its own - what matters is whether the state is the one this
-        // action was asking for.
+        // action was asking for, and whether the person is told why when it
+        // is not.
         //
         // rc.docktail exits zero for several outcomes that are not the
         // requested one: a start declined because DockTail is disabled or
@@ -141,21 +142,25 @@ switch ($action) {
         $wanted   = $action === 'stop' ? false : $enabled;
         $happened = $running === $wanted;
 
-        // 409 for all of it, because the page shows the first line of the
-        // body rather than the status code, and every case here is "the
-        // thing you asked for is not what is true now".
         if ($code !== 0) {
             http_response_code(409);
             echo 'DockTail did not ' . $action . ': the service script exited ' . $code
                 . ' without completing. It is ' . strtolower($state)
                 . ". See /var/log/docktail.log.\n";
+        } elseif ( ! $enabled && $action !== 'stop' && ! $running) {
+            // Not an error - the settings page says in so many words that
+            // Start and Restart honour this setting, and the daemon being
+            // down is what the setting asks for. But "DockTail is now
+            // stopped" is a non sequitur after pressing Start, and the page
+            // shows only this first line, so the reason belongs in it.
+            echo 'DockTail is disabled in settings, so the ' . $action
+                . " did not start it. Set Enable DockTail to Yes and press Apply.\n";
         } elseif ( ! $happened) {
             http_response_code(409);
 
-            // The reason is in the script's own output - disabled in
-            // settings, no Docker socket, a missing binary, a daemon that
-            // outlived its SIGKILL - so the first line points at it rather
-            // than guessing which one it was.
+            // The reason is in the script's own output - no Docker socket, a
+            // missing binary, a daemon that outlived its SIGKILL - so the
+            // first line points at it rather than guessing which one it was.
             echo 'DockTail is ' . strtolower($state) . ', which is not what ' . $action
                 . ' asked for. The service script did not say it failed; its output is below'
                 . ($output === [] ? ', but it printed nothing - see /var/log/docktail.log' : '')
