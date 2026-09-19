@@ -731,11 +731,24 @@ RC_LOCK="/var/run/docktail-lifecycle.lock"
 # Advisory only: it is read without the lock and nothing depends on it being
 # right, just on it changing when the lock changes hands.
 RC_LOCK_HOLDER="${RC_LOCK}.holder"
-RC_LOCK_WAIT=$((STOP_TIMEOUT + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 2 + 15))
-# Whole windows to wait through while the queue is visibly moving. One window
-# covers one restart, and the third invocation of a busy minute should not be
-# punished for the two ahead of it.
-RC_LOCK_TURNS=3
+#
+# Every part of the worst case, which is a restart that goes wrong at each
+# step: the stop and its drain (STOP_TIMEOUT), the pause between, the config
+# lock's own wait inside load_config(), then a start that finds a launcher in
+# flight - settling for START_VISIBLE_TIMEOUT and draining it with
+# ensure_gone(), another STOP_TIMEOUT - launches, waits START_VISIBLE_TIMEOUT
+# for the daemon to appear, does not see it, and drains that one too. Three
+# stop timeouts, not one: ensure_gone() is newer than this arithmetic was, and
+# a bound that does not include it is a bound that expires on a healthy
+# restart.
+RC_LOCK_WAIT=$((STOP_TIMEOUT * 3 + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 3 + 15))
+# Whole windows to wait through while the queue is visibly moving.
+#
+# Two, not three: each window now covers the true worst case rather than a
+# third of it, so two of them is already a longer wait than three used to be -
+# and past that, refusing is the safe answer rather than the patient one. The
+# caller is told, and nothing is done unserialised either way.
+RC_LOCK_TURNS=2
 
 # take_lifecycle_lock - wait for fd 8, for as long as waiting is progress.
 #

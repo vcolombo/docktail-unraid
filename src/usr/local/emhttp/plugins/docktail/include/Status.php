@@ -63,7 +63,11 @@ final class Status
         $result = self::run(escapeshellarg(RC_SCRIPT) . ' budget');
         $budget = (int) trim($result['out']);
 
-        if ($budget < 60 || $budget > 600) {
+        // The ceiling is above what the shipped numbers produce (335s at the
+        // time of writing) with room for them to grow, and the floor is below
+        // one drain. Outside that, the script is not answering this question
+        // and the fallback is a number that at least covers a stop.
+        if ($budget < 60 || $budget > 900) {
             return 240;
         }
 
