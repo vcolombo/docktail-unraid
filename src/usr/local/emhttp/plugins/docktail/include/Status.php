@@ -43,6 +43,37 @@ final class Status
      * "Running" or "Stopped", straight from the rc script so the page can never
      * disagree with the service itself.
      */
+    /**
+     * How long a start, stop or restart can legitimately take, in seconds.
+     *
+     * Asked of rc.docktail rather than written down here. The script owns
+     * every number in it - the lifecycle wait and how many turns of it a
+     * queue is allowed, the drain, the config lock's wait, the visibility
+     * wait - and the last time this was a constant on both sides they
+     * drifted: the page gave up at 150s on an action the script could still
+     * be doing at 195s, and told somebody it had failed.
+     *
+     * Clamped because it ends up in set_time_limit() and an XHR timeout: a
+     * script that prints nonsense (or nothing, on an older version that has
+     * no budget action) must not turn into an unbounded wait or an instant
+     * one.
+     */
+    public static function lifecycleBudget(): int
+    {
+        $result = self::run(escapeshellarg(RC_SCRIPT) . ' budget');
+        $budget = (int) trim($result['out']);
+
+        // The ceiling is above what the shipped numbers produce (335s at the
+        // time of writing) with room for them to grow, and the floor is below
+        // one drain. Outside that, the script is not answering this question
+        // and the fallback is a number that at least covers a stop.
+        if ($budget < 60 || $budget > 900) {
+            return 240;
+        }
+
+        return $budget;
+    }
+
     public static function serviceState(): string
     {
         $result = self::run(escapeshellarg(RC_SCRIPT) . ' status');
@@ -479,7 +510,8 @@ final class Status
     <strong>Start</strong> and <strong>Restart</strong> honour the <em>Enable DockTail</em>
     setting: neither starts anything while it is set to No.
     <strong>Stop</strong> waits for DockTail to withdraw every Service it advertises before
-    returning, which can take up to 35 seconds &mdash; killing it sooner would leave Services
+    returning, which can take up to 35 seconds &mdash; longer if it has to wait for a start or
+    stop that is already running &mdash; and killing it sooner would leave Services
     advertised on the tailnet with nothing behind them.
     <strong>Refresh</strong> only re-reads this page; it does not touch the service.
 </blockquote>
@@ -747,7 +779,8 @@ function docktailCheck(button) {
 
 /*
  * Submitted over AJAX rather than into the hidden progressFrame. A stop waits
- * up to 35 seconds for DockTail to withdraw its Services, and posting into a
+ * up to 35 seconds for DockTail to withdraw its Services - and before that, up
+ * to RC_LOCK_WAIT for any start or stop already in flight - and posting into a
  * frame nobody can see made that indistinguishable from a dead button.
  */
 function docktailControl(action) {
@@ -763,8 +796,8 @@ function docktailControl(action) {
 
     var progress = {
         start: 'Starting DockTail...',
-        stop: 'Stopping DockTail - waiting for it to withdraw its Services, up to 35 seconds...',
-        restart: 'Restarting DockTail - the stop waits for Services to withdraw, up to 35 seconds...'
+        stop: 'Stopping DockTail - waiting for it to withdraw its Services. Up to 35 seconds, longer if another start or stop is still finishing...',
+        restart: 'Restarting DockTail - the stop waits for Services to withdraw. Up to 35 seconds, longer if another start or stop is still finishing...'
     };
 
     note.removeClass('docktail-apply-error').text(progress[action] || 'Working...');
@@ -775,9 +808,13 @@ function docktailControl(action) {
         url: $('#docktail_control').attr('action'),
         type: 'POST',
         data: $('#docktail_control').serialize(),
-        // Comfortably beyond the drain window, so a slow stop is not reported
-        // as a failure while it is still working.
-        timeout: 90000
+        // Past the endpoint's own budget, which comes from rc.docktail: the
+        // lifecycle wait and the turns of it a queue is allowed, then the
+        // drain and the start. All three numbers - script, endpoint, browser
+        // - come from that one place now, because when they were written
+        // down separately they drifted, and a browser that gives up first
+        // reports a failure for work that is still running.
+        timeout: <?= (Status::lifecycleBudget() + 30) * 1000; ?>
     }).done(function(data) {
         // The endpoint's first line is the answer; the rest is rc output.
         message = String(data).split('\n')[0].trim() || 'Done.';
@@ -790,9 +827,13 @@ function docktailControl(action) {
         }
     }).fail(function(xhr) {
         failed  = true;
+        // The body first, when there is one: a refused action answers 409
+        // with the reason on its first line - another start or stop holding
+        // the lifecycle lock - and "HTTP 409" on its own tells nobody that.
+        var reason = xhr.responseText ? String(xhr.responseText).split('\n')[0].trim() : '';
         message = xhr.statusText === 'timeout'
             ? 'Timed out waiting for the service script. Reload to see the current state.'
-            : 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+            : (reason || 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.');
     }).always(function() {
         docktailControlBusy = false;
         buttons.prop('disabled', false);
