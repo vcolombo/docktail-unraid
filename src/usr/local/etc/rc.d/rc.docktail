@@ -854,7 +854,23 @@ case "$1" in
 'status')
   status_docktail
   ;;
+'budget')
+  # The longest a start, stop or restart can legitimately take, in seconds,
+  # for the callers that have to decide how long to wait for one.
+  #
+  # It exists because those callers had the number written into them: the
+  # settings page allowed 150s while this script, once the lifecycle wait
+  # learned to sit through a queue, could spend 195s before the action even
+  # begins - so the browser gave up on work that was still running and told
+  # somebody it had failed. Two places holding one number is how they drift;
+  # this is the place that knows it.
+  #
+  # The wait (RC_LOCK_WAIT per turn, up to RC_LOCK_TURNS of them), then the
+  # work: a stop and its drain, the config lock's own wait, and a start
+  # waiting twice over for the daemon to become visible.
+  echo $((RC_LOCK_WAIT * RC_LOCK_TURNS + STOP_TIMEOUT + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 2 + 5))
+  ;;
 *)
-  echo "usage $0 start|stop|restart|status"
+  echo "usage $0 start|stop|restart|status|budget"
   ;;
 esac

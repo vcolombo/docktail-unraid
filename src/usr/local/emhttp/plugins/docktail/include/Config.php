@@ -230,10 +230,17 @@ final class Config
         );
     }
 
-    /** The bytes of the shipped defaults, or false if they cannot be read. */
+    /**
+     * The bytes of the shipped defaults, or false if they cannot be read.
+     *
+     * Through the same guard as the flash files, even though this one lives
+     * in the package: a FIFO here would block snapshot() and every revision
+     * hash, and "it is only replaceable by root" is the argument that was
+     * wrong about the lock files too.
+     */
     private static function defaultsBody(): string|false
     {
-        return @file_get_contents(self::DEFAULTS_FILE);
+        return self::readIfRegular(self::DEFAULTS_FILE);
     }
 
     /**

@@ -43,6 +43,33 @@ final class Status
      * "Running" or "Stopped", straight from the rc script so the page can never
      * disagree with the service itself.
      */
+    /**
+     * How long a start, stop or restart can legitimately take, in seconds.
+     *
+     * Asked of rc.docktail rather than written down here. The script owns
+     * every number in it - the lifecycle wait and how many turns of it a
+     * queue is allowed, the drain, the config lock's wait, the visibility
+     * wait - and the last time this was a constant on both sides they
+     * drifted: the page gave up at 150s on an action the script could still
+     * be doing at 195s, and told somebody it had failed.
+     *
+     * Clamped because it ends up in set_time_limit() and an XHR timeout: a
+     * script that prints nonsense (or nothing, on an older version that has
+     * no budget action) must not turn into an unbounded wait or an instant
+     * one.
+     */
+    public static function lifecycleBudget(): int
+    {
+        $result = self::run(escapeshellarg(RC_SCRIPT) . ' budget');
+        $budget = (int) trim($result['out']);
+
+        if ($budget < 60 || $budget > 600) {
+            return 240;
+        }
+
+        return $budget;
+    }
+
     public static function serviceState(): string
     {
         $result = self::run(escapeshellarg(RC_SCRIPT) . ' status');
@@ -777,12 +804,13 @@ function docktailControl(action) {
         url: $('#docktail_control').attr('action'),
         type: 'POST',
         data: $('#docktail_control').serialize(),
-        // Beyond the endpoint's whole budget, not just the drain window: a
-        // stop arriving behind a restart waits for the lifecycle lock (65s)
-        // before its own work (a 35s drain, plus a start), and apply.php
-        // allows 150s for that. Reporting a failure while the server is still
-        // working is how the page ends up disagreeing with the daemon.
-        timeout: 160000
+        // Past the endpoint's own budget, which comes from rc.docktail: the
+        // lifecycle wait and the turns of it a queue is allowed, then the
+        // drain and the start. All three numbers - script, endpoint, browser
+        // - come from that one place now, because when they were written
+        // down separately they drifted, and a browser that gives up first
+        // reports a failure for work that is still running.
+        timeout: <?= (Status::lifecycleBudget() + 30) * 1000; ?>
     }).done(function(data) {
         // The endpoint's first line is the answer; the rest is rc output.
         message = String(data).split('\n')[0].trim() || 'Done.';

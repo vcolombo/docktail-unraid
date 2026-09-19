@@ -108,14 +108,15 @@ switch ($action) {
         // Direct, not deferred: an explicit stop must wait for DockTail to
         // withdraw its Tailscale Services before the request returns.
         //
-        // The budget is the whole thing rc.docktail can legitimately spend:
-        // waiting for the lifecycle lock (RC_LOCK_WAIT, 65s - a restart can
-        // hold it for a stop, a config-lock wait and a visibility wait) and
-        // then doing the work (a 35s drain, plus a start). Cut this short and
-        // the request reports a failure for an action that is still running,
-        // which is how Services end up advertised with nothing behind them
-        // while the page says the stop failed.
-        @set_time_limit(150);
+        // The budget comes from rc.docktail, which owns every number in it -
+        // the lifecycle wait and the turns of it a queue is allowed, the
+        // drain, the config-lock wait, the visibility wait. It was written
+        // here as 150 and the script grew past it: cut short, the request
+        // reports a failure for an action that is still running, which is how
+        // Services end up advertised with nothing behind them while the page
+        // says the stop failed. A little more than the budget, because the
+        // exec has to finish and be reported inside it.
+        @set_time_limit(Status::lifecycleBudget() + 15);
 
         // $code initialised to a failure: @exec() leaves it untouched if it
         // cannot run at all, and a stop that never ran must not read as one
