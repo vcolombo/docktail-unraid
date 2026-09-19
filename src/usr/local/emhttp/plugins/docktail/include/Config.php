@@ -633,8 +633,14 @@ final class Config
         // read and every save - before flock(), before its timeout, before
         // the fail-open path that exists precisely so this code never waits
         // on a lock forever. Absent is fine, and so is a regular file.
-        if (file_exists(self::LOCK_FILE) && ! is_file(self::LOCK_FILE)) {
-            self::logUnlocked(self::LOCK_FILE . ' is not a regular file', $operation, $consequence);
+        //
+        // is_link() first, and on its own: file_exists() follows the link, so
+        // a dangling one looks like an absent path - and fopen(, 'c') would
+        // then create whatever it points at, anywhere on the filesystem, as
+        // root. One that does resolve is refused too, because a lock taken on
+        // an inode somebody else chose is not serialisation.
+        if (is_link(self::LOCK_FILE) || (file_exists(self::LOCK_FILE) && ! is_file(self::LOCK_FILE))) {
+            self::logUnlocked(self::LOCK_FILE . ' is a symlink or not a regular file', $operation, $consequence);
 
             return $work(false);
         }
@@ -763,7 +769,7 @@ final class Config
      *         protected: list<string>, exposed: list<string>,
      *         quarantined: list<string>,
      *         ignored: list<string>, malformed: list<string>,
-     *         unparseable: list<string>}
+     *         unparseable: list<string>, linked: list<string>}
      *         ok is false only when a file that needed converting could not be
      *         written; deferred says the config lock was held by a save, so
      *         nothing was read or written at all and the next boot tries
@@ -778,7 +784,9 @@ final class Config
      *         settings files moved aside because they hold a credential, cannot
      *         be read, and are part of the flash backup where they were; ignored names keys
      *         nothing reads; malformed names lines the service skips on syntax
-     *         alone; unparseable names files PHP could not parse at all
+     *         alone; unparseable names files PHP could not parse at all;
+     *         linked names config paths that are symlinks, which this leaves
+     *         untouched rather than replacing with a plain file
      */
     public static function normalizeStoredFiles(): array
     {
@@ -802,6 +810,7 @@ final class Config
                 'malformed'   => [],
                 'unparseable' => [],
                 'unreadable'  => [],
+                'linked'      => [],
             ];
             // Without the lock, nothing. withLock() fails open after five
             // seconds, and this rewrite is a read-stage-rename of the whole
@@ -839,6 +848,19 @@ final class Config
             // has to know whether the credentials file already holds one.
             $state = [];
             foreach (array_keys($modes) as $file) {
+                // A link is left exactly as it is. is_file() follows one, so
+                // this would otherwise read through it and then rename over
+                // it - replacing an arrangement somebody made deliberately
+                // with a plain file, silently, on the next boot. A dangling
+                // one reads as absent and gets the same treatment for the
+                // same reason. Nothing here is this function's to replace.
+                if (is_link($file)) {
+                    $report['linked'][] = $file;
+                    $state[$file]       = ['values' => [], 'malformed' => [], 'usable' => false];
+
+                    continue;
+                }
+
                 $read = is_file($file)
                     ? self::parseAsReader($file)
                     : ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => false];
@@ -1291,6 +1313,10 @@ final class Config
             'malformed'   => [],
             'unparseable' => $report['unparseable'],
             'unreadable'  => $report['unreadable'],
+            // Carried, not emptied: a symlinked config path is still a
+            // symlinked config path when the write that failed had nothing to
+            // do with it, and every caller of this reads the same keys.
+            'linked'      => $report['linked'],
         ];
     }
 

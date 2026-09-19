@@ -61,6 +61,9 @@ php -d display_errors=stderr -r '
   foreach ($r["unreadable"] as $file) {
       echo "docktail: could not read $file at all - it is still there, so nothing was changed, and the service is running on the shipped defaults for whatever it holds. Check the flash device.\n";
   }
+  foreach ($r["linked"] as $file) {
+      echo "docktail: left $file alone - it is a symlink, and converting it would mean replacing the link with a plain file. DockTail reads through it, but nothing here rewrites it; point the link at a file you have converted, or replace it with a regular file and press Apply.\n";
+  }
   if ( ! empty($r["deferred"])) {
       echo "docktail: left the stored config alone for now - a settings save was in progress and holding the config lock, and rewriting the pair underneath it would lose what was being saved. DockTail reads it either way; the next boot converts it, and pressing Apply does it sooner.\n";
   }

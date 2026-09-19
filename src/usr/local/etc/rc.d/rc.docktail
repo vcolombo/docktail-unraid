@@ -192,7 +192,12 @@ CONFIG_LOCK_WAIT=5
 # every start and stop. Absent is fine (the redirection creates it) and so is a
 # regular file; anything else takes the fail-open path with a line in the log.
 lock_path_usable() {
-  [ ! -e "$1" ] || [ -f "$1" ]
+  # -L first, and explicitly: every other test here follows a link, so a
+  # dangling one reads as an absent path - and then the redirection follows it
+  # and creates whatever it points at, anywhere on the system, as root. A link
+  # that does resolve is refused too: the lock would be taken on an inode
+  # somebody else chose, which is not serialisation.
+  [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; }
 }
 
 load_config() {
