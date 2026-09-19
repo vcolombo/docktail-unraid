@@ -81,16 +81,26 @@ printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cf
 # noclobber, not a test-then-create: an Apply can land between the two and this
 # would then copy /dev/null over credentials it just saved. `set -C` makes the
 # redirection itself fail when the file exists, which is one atomic syscall.
-(
-    umask 077
-    set -C
-    : > /boot/config/plugins/docktail/credentials.cfg
-) 2> /dev/null || true
+#
+# The -e/-L test in front of it is not that race back again - `set -C` is still
+# what guarantees nothing is overwritten. It is there because a redirection
+# opens whatever is at the path, and opening a FIFO for writing blocks until
+# something reads it: a named pipe left at credentials.cfg would hang this
+# install, and it runs at boot. Testing first means a special file is never
+# opened at all, and the branch below reports it instead.
+if [ ! -e /boot/config/plugins/docktail/credentials.cfg ] && [ ! -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    (
+        umask 077
+        set -C
+        : > /boot/config/plugins/docktail/credentials.cfg
+    ) 2> /dev/null || true
+fi
+
 # Only a real file. chmod follows symlinks and has no option not to, so this
 # line - running as root - would otherwise set 0600 on whatever a symlink left
 # at that path happened to point at. The umask above already creates the file
 # private, so this is for the one it did not create: an existing credentials
-# file from a previous install, which the noclobber redirection left alone.
+# file from a previous install, which the block above left alone.
 if [ -f /boot/config/plugins/docktail/credentials.cfg ] && [ ! -L /boot/config/plugins/docktail/credentials.cfg ]; then
     chmod 0600 /boot/config/plugins/docktail/credentials.cfg
 elif [ -e /boot/config/plugins/docktail/credentials.cfg ] || [ -L /boot/config/plugins/docktail/credentials.cfg ]; then

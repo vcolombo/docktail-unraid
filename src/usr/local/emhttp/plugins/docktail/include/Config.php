@@ -863,7 +863,7 @@ final class Config
                             // The aside is named with why it was moved, so the
                             // install log can say "cannot be read" rather than
                             // claiming a NUL byte it has not seen.
-                            $report[@chmod($aside, 0600) ? 'quarantined' : 'exposed'][] =
+                            $report[self::protect($aside) ? 'quarantined' : 'exposed'][] =
                                 $read['unreadable'] ? $aside . ' (unreadable)' : $aside;
                             continue;
                         }
@@ -872,7 +872,7 @@ final class Config
                         // the name the flash backup includes. A chmod does not
                         // fix that - it only stops local readers - so this is
                         // an exposure whatever it returns.
-                        @chmod($file, 0600);
+                        self::protect($file);
                         $report['exposed'][] = $file;
                         $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
                         continue;
@@ -881,7 +881,7 @@ final class Config
                     // credentials.cfg is excluded from the backup already, so
                     // the mode is the whole exposure there - and a failed
                     // chmod is the loudest thing this function can find.
-                    $report[@chmod($file, 0600) ? 'protected' : 'exposed'][] = $file;
+                    $report[self::protect($file) ? 'protected' : 'exposed'][] = $file;
                     $report[$read['unreadable'] ? 'unreadable' : 'unparseable'][] = $file;
 
                     continue;
@@ -899,12 +899,13 @@ final class Config
             // 0644. Only the credentials file: docktail.cfg is settings, it is
             // backed up by Unraid Connect on purpose, and nothing that belongs
             // in the other file is left in it.
+            // Every tighten goes through protect(), which refuses a symlink.
             foreach ($modes as $file => $mode) {
                 if ($mode !== 0600 || ! is_file($file) || (@fileperms($file) & 0777) === 0600) {
                     continue;
                 }
 
-                $report[@chmod($file, 0600) ? 'protected' : 'exposed'][] = $file;
+                $report[self::protect($file) ? 'protected' : 'exposed'][] = $file;
             }
 
             foreach ($modes as $file => $mode) {
@@ -987,6 +988,25 @@ final class Config
 
             return ['ok' => true] + $report;
         }, LOCK_EX, 'Nothing was read or written, so a save in progress keeps what it saved; the next boot converts the config instead.');
+    }
+
+    /**
+     * Make a credential-bearing file private - unless it is a symlink.
+     *
+     * chmod() follows links and has no option not to, so a link at one of
+     * these paths turns every tighten below into root setting the mode of
+     * whatever it points at, chosen by whoever placed the link, on every boot.
+     * Replacing a link the operator put there is not this function's decision,
+     * and following it is worse than leaving it, so a link is a failure to
+     * protect - which the callers already report as an exposure for the
+     * operator to look at.
+     *
+     * The installer refuses the same thing for the same reason. This is the
+     * boot side of it, and it is the one that runs every time.
+     */
+    private static function protect(string $file): bool
+    {
+        return ! is_link($file) && @chmod($file, 0600);
     }
 
     /**
