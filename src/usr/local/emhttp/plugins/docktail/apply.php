@@ -124,8 +124,25 @@ switch ($action) {
         $code   = 1;
         @exec(escapeshellarg(RC_SCRIPT) . ' ' . escapeshellarg($action) . ' 2>&1', $output, $code);
 
-        // First line is what the page shows, so make it the answer.
-        echo 'DockTail is now ' . strtolower(Status::serviceState()) . ".\n";
+        // First line is what the page shows, so make it the answer - and the
+        // answer depends on whether the action happened. rc.docktail returns
+        // non-zero when it declines to run rather than run without the
+        // lifecycle lock, and the state it reports then is the one from
+        // before the request: printing it as "DockTail is now ..." would tell
+        // somebody their stop worked when nothing was stopped.
+        //
+        // 409, because the usual cause is exactly that - another start or
+        // stop holding the lock - and the page shows the first line of the
+        // body rather than the status code.
+        if ($code !== 0) {
+            http_response_code(409);
+            echo 'DockTail did not ' . $action . ': the service script exited ' . $code
+                . ' without completing. It is ' . strtolower(Status::serviceState())
+                . ". See /var/log/docktail.log.\n";
+        } else {
+            echo 'DockTail is now ' . strtolower(Status::serviceState()) . ".\n";
+        }
+
         if ($output !== []) {
             echo implode("\n", $output) . "\n";
         }

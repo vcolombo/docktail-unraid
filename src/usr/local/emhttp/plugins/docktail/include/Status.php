@@ -795,9 +795,13 @@ function docktailControl(action) {
         }
     }).fail(function(xhr) {
         failed  = true;
+        // The body first, when there is one: a refused action answers 409
+        // with the reason on its first line - another start or stop holding
+        // the lifecycle lock - and "HTTP 409" on its own tells nobody that.
+        var reason = xhr.responseText ? String(xhr.responseText).split('\n')[0].trim() : '';
         message = xhr.statusText === 'timeout'
             ? 'Timed out waiting for the service script. Reload to see the current state.'
-            : 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.';
+            : (reason || 'Request failed: HTTP ' + xhr.status + '. See /var/log/docktail.log.');
     }).always(function() {
         docktailControlBusy = false;
         buttons.prop('disabled', false);

@@ -283,6 +283,35 @@ is_running() {
   "$PGREP" --ns $$ --euid root -f "^${BIN}" 1> /dev/null 2> /dev/null
 }
 
+# ensure_gone PID - wait out a TERM already sent, escalate, and answer whether
+# the way is clear for a new daemon.
+#
+# The two adoption fallbacks send a TERM and then went straight on to launch.
+# A TERM is a request: a daemon draining its Services takes as long as that
+# takes, and one that ignores the signal takes forever - so the old one and
+# the new one overlapped, which is the two-daemon state those branches exist
+# to prevent. is_running() cannot answer this on its own either, because a
+# script-shaped $BIN is invisible to it by design, so the recorded pid is
+# checked as well.
+#
+# The bound is the ordinary stop's, because this is the ordinary stop's work.
+ensure_gone() {
+  local pid="$1" waited=0
+
+  while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
+    if ! is_running && ! pid_is_docktail "$pid"; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  "$PKILL" --ns $$ --euid root -KILL -f "$(cleanup_pattern)" 2> /dev/null
+  sleep 1
+
+  ! is_running && ! pid_is_docktail "$pid"
+}
+
 start_docktail() {
   load_config
 
@@ -362,6 +391,15 @@ start_docktail() {
       # And if it exec'd but is still not visible - a $BIN that is a script,
       # mid-interpreter - the anchored name catches what the marker cannot.
       "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
+
+      # A TERM is a request, and this function is about to launch a daemon. If
+      # the old one is still draining - or ignoring the signal - starting now
+      # is the overlap this whole branch exists to prevent, so the launch is
+      # refused rather than risked.
+      if ! ensure_gone "$adopted"; then
+        log "Pid $adopted did not stop, so DockTail is not being started: a second daemon would advertise the same Services as the first."
+        return 1
+      fi
     fi
   fi
 
@@ -445,6 +483,12 @@ start_docktail() {
       # lives in the launcher's argv and is gone the moment DockTail replaces
       # it, so the two patterns cover the two halves of that handover.
       "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
+
+      # Said plainly when it does not work, because the next start is the
+      # thing that turns a survivor into two daemons and this is the last
+      # place that can see it.
+      ensure_gone "$started" \
+        || log "Pid $started did not stop; a later start could bring up a second daemon beside it."
     else
       log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
     fi
@@ -710,7 +754,7 @@ take_lifecycle_lock() {
       return 0
     fi
 
-    current=$(cat "$RC_LOCK_HOLDER" 2> /dev/null)
+    current=$(lock_path_usable "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null)
     turns=$((turns + 1))
 
     # The same pid through a whole window is something stuck, and the only
@@ -756,14 +800,19 @@ serialised() {
       log "Running $action without the lifecycle lock: $RC_LOCK could not be opened, or is not a regular file. Another start or stop landing together with this one could leave two daemons."
     elif take_lifecycle_lock; then
       locked=1
-      printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
+      # Guarded like the lock itself: a FIFO left at the holder path would
+      # block this write until a reader appeared, hanging the start it has
+      # just serialised. Publishing the pid is advisory, so skipping it costs
+      # a waiter one turn of patience and nothing else.
+      lock_path_usable "$RC_LOCK_HOLDER" \
+        && printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
     else
       # Nothing, rather than the same work unserialised. A start interleaved
       # with a stop leaves either two daemons advertising the same Services or
       # none at all, and whatever is holding the lock this long is doing
       # lifecycle work of its own - so the outcome of doing nothing is the one
       # that holder produces, which is a defined one.
-      log "Not running $action: the lifecycle lock has been held by pid $(cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
+      log "Not running $action: the lifecycle lock has been held by pid $(lock_path_usable "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
       { exec 8>&-; } 2> /dev/null
 
       return 1
@@ -777,8 +826,11 @@ serialised() {
   esac
   rc=$?
 
-  # Before the unlock, so the next holder never sees the last one's pid.
-  [ "$locked" = 1 ] && rm -f "$RC_LOCK_HOLDER" 2> /dev/null
+  # Before the unlock, so the next holder never sees the last one's pid - and
+  # only the file this function would have written. Something else at that
+  # path was not published by this script and is not this script's to delete.
+  [ "$locked" = 1 ] && lock_path_usable "$RC_LOCK_HOLDER" \
+    && rm -f "$RC_LOCK_HOLDER" 2> /dev/null
   [ "$locked" = 1 ] && flock -u 8 2> /dev/null
   { exec 8>&-; } 2> /dev/null
   return $rc
