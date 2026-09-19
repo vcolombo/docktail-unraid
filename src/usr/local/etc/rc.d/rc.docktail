@@ -462,7 +462,11 @@ start_docktail() {
   # clearing something that is not a pidfile is tidying up after whatever left
   # it, not overruling anybody. A symlink goes the same way - rm takes the
   # link, never what it points at.
-  if [ -e "$PIDFILE" ] && ! path_is_plain_file "$PIDFILE"; then
+  # No -e in front of this: that test follows links, so a dangling one would
+  # have read as absent and been left exactly where the child's redirection
+  # could follow it - which is the write this guard exists to stop. The
+  # predicate already answers "absent" with yes.
+  if ! path_is_plain_file "$PIDFILE"; then
     log "$PIDFILE is not a regular file; removing it before starting, because writing the new pid to it could block forever."
     rm -f "$PIDFILE"
   fi
@@ -813,8 +817,17 @@ take_lifecycle_lock() {
 serialised() {
   local action="$1" locked=0 opened=1 previous_umask rc=0
 
+  # Every way of not having the lock ends the same way: nothing runs. The
+  # earlier version logged and carried on, which is the concurrent start/stop
+  # this lock exists to prevent - arriving in exactly the situations where
+  # something is already wrong with the system. A start that did not happen is
+  # visible on the settings page and in this log; two daemons advertising the
+  # same Services are visible to nobody until the tailnet disagrees with
+  # itself.
   if ! command -v flock > /dev/null 2>&1; then
-    log "Running $action without the lifecycle lock: no flock on this system. Another start or stop landing together with this one could leave two daemons."
+    log "Not running $action: there is no flock on this system, so a start and a stop landing together could leave two daemons and nothing here could tell. Install util-linux."
+
+    return 1
   else
     # Same shape as the config lock above - root-only, umask restored, and the
     # redirection inside a brace group so it does not apply to this shell.
@@ -835,7 +848,10 @@ serialised() {
     [ "$opened" -eq 0 ] && [ ! -L "$RC_LOCK" ] && chmod 600 "$RC_LOCK" 2> /dev/null
 
     if [ "$opened" -ne 0 ]; then
-      log "Running $action without the lifecycle lock: $RC_LOCK could not be opened, or is not a regular file. Another start or stop landing together with this one could leave two daemons."
+      log "Not running $action: $RC_LOCK could not be opened, or is not a regular file - a symlink, a FIFO or a directory there is not something this can lock. Remove it. Running unlocked could leave two daemons."
+      { exec 8>&-; } 2> /dev/null
+
+      return 1
     elif take_lifecycle_lock; then
       locked=1
       # Guarded like the lock itself: a FIFO left at the holder path would
