@@ -275,6 +275,21 @@ final class Config
      */
     private static function parseAsReader(string $file): array
     {
+        // What is at the path, before opening it. file_get_contents() on a
+        // FIFO blocks until something writes to it, and on a character device
+        // it reads until the read fails - either one hangs a settings page
+        // render or an Apply, from a path the installer deliberately leaves
+        // alone when it is not a regular file. rc.docktail refuses the same
+        // thing with [ -f ], and the two readers have to agree about what is
+        // readable or the page and the service disagree about the config.
+        //
+        // Reported as unreadable, which is exactly what it is: the file is
+        // there, nothing was read, and the caller must not treat that as an
+        // empty config.
+        if (file_exists($file) && ! is_file($file)) {
+            return ['values' => [], 'malformed' => [], 'nul' => false, 'unreadable' => true];
+        }
+
         $raw = @file_get_contents($file);
 
         // A file that exists and cannot be read is not an empty file. It is
@@ -624,8 +639,11 @@ final class Config
         }
 
         // An existing file from an older version of this plugin is tightened
-        // here, the way the shell side does it.
-        @chmod(self::LOCK_FILE, 0600);
+        // here, the way the shell side does it - through protect(), so a
+        // symlink standing in for the lock file is not a way to have root
+        // change the mode of something else. Serialisation is unaffected
+        // either way: flock() is on the open handle, not on the name.
+        self::protect(self::LOCK_FILE);
 
         // Non-blocking with a bounded retry, rather than waiting forever on
         // whatever is holding it.
@@ -1198,8 +1216,13 @@ final class Config
                 // exactly how long that would sit there. A chmod costs the
                 // live writer nothing: its own temp is already 0600, and the
                 // mode is not what it is about to rename.
+                // Through protect(), like every other tighten: a symlink
+                // here - dropped in under a name this glob matches - would
+                // otherwise have root setting 0600 on its target. A link is
+                // never something this function wrote, so there is nothing
+                // lost by leaving it exactly as it is.
                 if ((@fileperms($stale) & 0777) !== 0600) {
-                    @chmod($stale, 0600);
+                    self::protect($stale);
                 }
             }
         }
@@ -1226,7 +1249,7 @@ final class Config
         // the categories those produce are not in $unremoved. The file is what
         // matters here, not which decision put the secret in it.
         if (self::holdsSecret(self::SETTINGS_FILE)) {
-            if (@chmod(self::SETTINGS_FILE, 0600)) {
+            if (self::protect(self::SETTINGS_FILE)) {
                 $protected[] = self::SETTINGS_FILE;
             } else {
                 $exposed[] = self::SETTINGS_FILE;

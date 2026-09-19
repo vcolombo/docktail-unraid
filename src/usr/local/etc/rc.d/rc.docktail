@@ -203,7 +203,11 @@ load_config() {
 
     # The umask only covers creating it; an existing one from an older
     # version of this plugin is tightened here, the way the PHP side does.
-    [ "$opened" -eq 0 ] && chmod 600 "$CONFIG_LOCK" 2> /dev/null
+    # Not through a symlink: chmod follows one, so a link left at this
+    # path would be a way to have root change the mode of something
+    # else. The lock still works either way - flock is on the open
+    # descriptor, not on the name.
+    [ "$opened" -eq 0 ] && [ ! -L "$CONFIG_LOCK" ] && chmod 600 "$CONFIG_LOCK" 2> /dev/null
 
     if [ "$opened" -ne 0 ]; then
       log "Reading the config without the write lock: $CONFIG_LOCK could not be opened. A save landing in the middle of this read could be picked up half-applied."
@@ -658,7 +662,55 @@ status_docktail() {
 # concurrent action time out at 45s while a restart legitimately held the lock
 # for longer - and then run unlocked, which is the race this exists to stop.
 RC_LOCK="/var/run/docktail-lifecycle.lock"
+# Who holds it, for the wait below to tell a queue from something wedged.
+# Advisory only: it is read without the lock and nothing depends on it being
+# right, just on it changing when the lock changes hands.
+RC_LOCK_HOLDER="${RC_LOCK}.holder"
 RC_LOCK_WAIT=$((STOP_TIMEOUT + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 2 + 15))
+# Whole windows to wait through while the queue is visibly moving. One window
+# covers one restart, and the third invocation of a busy minute should not be
+# punished for the two ahead of it.
+RC_LOCK_TURNS=3
+
+# take_lifecycle_lock - wait for fd 8, for as long as waiting is progress.
+#
+# One window covers the longest thing that can legitimately hold this lock: a
+# restart is a stop and its drain, the pause between, the config lock's own
+# wait inside load_config(), then a start waiting for the daemon to be visible
+# and, if it never is, stopping it again. But a bound that covers one restart
+# does not cover two queued ahead of you, and the third invocation then timed
+# out and ran unlocked - the exact interleaving this lock exists to prevent,
+# arriving precisely when the system is busiest with lifecycle work.
+#
+# So a window that expires while the lock has changed hands is not a timeout,
+# it is a queue: the wait starts again, up to RC_LOCK_TURNS of them. A window
+# that expires with the same pid still holding it is something stuck, and that
+# is the only case that gives up.
+take_lifecycle_lock() {
+  local turns=0 last="" current=""
+
+  while :; do
+    if flock -w "$RC_LOCK_WAIT" 8 2> /dev/null; then
+      return 0
+    fi
+
+    current=$(cat "$RC_LOCK_HOLDER" 2> /dev/null)
+    turns=$((turns + 1))
+
+    # The same pid through a whole window is something stuck, and the only
+    # case worth giving up on early. Anything else is treated as a queue and
+    # given another window up to the cap - including a holder that publishes
+    # no pid at all, which is what an rc.docktail from before this file
+    # existed looks like during an upgrade. Refusing to wait for a perfectly
+    # healthy predecessor would be a worse bug than the one this fixes.
+    if [ -n "$current" ] && [ "$current" = "$last" ]; then
+      return 1
+    fi
+
+    [ "$turns" -ge "$RC_LOCK_TURNS" ] && return 1
+    last="$current"
+  done
+}
 
 serialised() {
   local action="$1" locked=0 opened=1 previous_umask rc=0
@@ -674,14 +726,27 @@ serialised() {
     opened=$?
     umask "$previous_umask"
 
-    [ "$opened" -eq 0 ] && chmod 600 "$RC_LOCK" 2> /dev/null
+    # Not through a symlink: chmod follows one, so a link left at this
+    # path would be a way to have root change the mode of something
+    # else. The lock still works either way - flock is on the open
+    # descriptor, not on the name.
+    [ "$opened" -eq 0 ] && [ ! -L "$RC_LOCK" ] && chmod 600 "$RC_LOCK" 2> /dev/null
 
     if [ "$opened" -ne 0 ]; then
       log "Running $action without the lifecycle lock: $RC_LOCK could not be opened. Another start or stop landing together with this one could leave two daemons."
-    elif flock -w "$RC_LOCK_WAIT" 8 2> /dev/null; then
+    elif take_lifecycle_lock; then
       locked=1
+      printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
     else
-      log "Running $action without the lifecycle lock: still held after ${RC_LOCK_WAIT}s, which is longer than a whole restart can legitimately take."
+      # Nothing, rather than the same work unserialised. A start interleaved
+      # with a stop leaves either two daemons advertising the same Services or
+      # none at all, and whatever is holding the lock this long is doing
+      # lifecycle work of its own - so the outcome of doing nothing is the one
+      # that holder produces, which is a defined one.
+      log "Not running $action: the lifecycle lock has been held by pid $(cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
+      { exec 8>&-; } 2> /dev/null
+
+      return 1
     fi
   fi
 
@@ -692,6 +757,8 @@ serialised() {
   esac
   rc=$?
 
+  # Before the unlock, so the next holder never sees the last one's pid.
+  [ "$locked" = 1 ] && rm -f "$RC_LOCK_HOLDER" 2> /dev/null
   [ "$locked" = 1 ] && flock -u 8 2> /dev/null
   { exec 8>&-; } 2> /dev/null
   return $rc
