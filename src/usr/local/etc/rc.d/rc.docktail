@@ -183,15 +183,16 @@ CONFIG_LOCK="/var/run/docktail-config.lock"
 # the same thing whichever side hits it.
 CONFIG_LOCK_WAIT=5
 
-# lock_path_usable PATH - is it safe to open this as a lock file?
+# path_is_plain_file PATH - is it safe to open this as a lock file?
 #
-# A redirection opens whatever is at the path, and opening a FIFO for writing
-# blocks until a reader appears - before flock, before its timeout, before any
-# diagnostic. A named pipe left at a lock path would therefore hang the thing
-# the bounded wait below exists to keep bounded: load_config() during boot, or
-# every start and stop. Absent is fine (the redirection creates it) and so is a
-# regular file; anything else takes the fail-open path with a line in the log.
-lock_path_usable() {
+# A redirection opens whatever is at the path, and opening a FIFO blocks until
+# the other end appears - for writing until a reader does, for reading until a
+# writer does. Before flock, before any timeout, before any diagnostic. A named
+# pipe at a lock path, the holder path or the pidfile therefore hangs exactly
+# the thing the bounded waits exist to keep bounded: load_config() during boot,
+# or every start and stop. Absent is fine - the redirection creates it - and so
+# is a regular file; anything else is refused by its caller.
+path_is_plain_file() {
   # -L first, and explicitly: every other test here follows a link, so a
   # dangling one reads as an absent path - and then the redirection follows it
   # and creates whatever it points at, anywhere on the system, as root. A link
@@ -214,7 +215,7 @@ load_config() {
     # every later start and stop diagnostic.
     previous_umask=$(umask)
     umask 077
-    if lock_path_usable "$CONFIG_LOCK"; then
+    if path_is_plain_file "$CONFIG_LOCK"; then
       { exec 9>> "$CONFIG_LOCK"; } 2> /dev/null
       opened=$?
     else
@@ -352,8 +353,14 @@ start_docktail() {
   # child does, however the launching shell died. is_running() cannot see those:
   # the process is still the launcher shell. Launching a second one here is how
   # two daemons end up reconciling the same tailnet, so this waits for it.
+  #
+  # Guarded, because reading a FIFO blocks until somebody writes to it: a
+  # named pipe at this path would stop a start here, holding the lifecycle
+  # lock, before any of the bounds below apply.
   local adopted adopted_token
-  read -r adopted adopted_token < "$PIDFILE" 2> /dev/null || true
+  if path_is_plain_file "$PIDFILE"; then
+    read -r adopted adopted_token < "$PIDFILE" 2> /dev/null || true
+  fi
   if pid_is_docktail "$adopted"; then
     log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
 
@@ -447,6 +454,19 @@ start_docktail() {
   # second daemon, and by the time it gets the lock the pidfile exists. The
   # daemon itself must not hold either descriptor, so the child drops both in
   # the same breath as its exec.
+  # The child's first act is to write the pidfile, and writing to a FIFO
+  # blocks until a reader appears - so a named pipe at this path would hang
+  # the launcher before its exec, with this shell waiting on it and the
+  # lifecycle lock held. Unlike the config files, this path is the script's
+  # own: it creates it on every start and removes it on every stop, so
+  # clearing something that is not a pidfile is tidying up after whatever left
+  # it, not overruling anybody. A symlink goes the same way - rm takes the
+  # link, never what it points at.
+  if [ -e "$PIDFILE" ] && ! path_is_plain_file "$PIDFILE"; then
+    log "$PIDFILE is not a regular file; removing it before starting, because writing the new pid to it could block forever."
+    rm -f "$PIDFILE"
+  fi
+
   local token launch_token_of_started
   token=$(launch_token)
   launch_token_of_started="$token"
@@ -772,7 +792,7 @@ take_lifecycle_lock() {
       return 0
     fi
 
-    current=$(lock_path_usable "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null)
+    current=$(path_is_plain_file "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null)
     turns=$((turns + 1))
 
     # The same pid through a whole window is something stuck, and the only
@@ -800,7 +820,7 @@ serialised() {
     # redirection inside a brace group so it does not apply to this shell.
     previous_umask=$(umask)
     umask 077
-    if lock_path_usable "$RC_LOCK"; then
+    if path_is_plain_file "$RC_LOCK"; then
       { exec 8>> "$RC_LOCK"; } 2> /dev/null
       opened=$?
     else
@@ -822,7 +842,7 @@ serialised() {
       # block this write until a reader appeared, hanging the start it has
       # just serialised. Publishing the pid is advisory, so skipping it costs
       # a waiter one turn of patience and nothing else.
-      lock_path_usable "$RC_LOCK_HOLDER" \
+      path_is_plain_file "$RC_LOCK_HOLDER" \
         && printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
     else
       # Nothing, rather than the same work unserialised. A start interleaved
@@ -830,7 +850,7 @@ serialised() {
       # none at all, and whatever is holding the lock this long is doing
       # lifecycle work of its own - so the outcome of doing nothing is the one
       # that holder produces, which is a defined one.
-      log "Not running $action: the lifecycle lock has been held by pid $(lock_path_usable "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
+      log "Not running $action: the lifecycle lock has been held by pid $(path_is_plain_file "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
       { exec 8>&-; } 2> /dev/null
 
       return 1
@@ -847,7 +867,7 @@ serialised() {
   # Before the unlock, so the next holder never sees the last one's pid - and
   # only the file this function would have written. Something else at that
   # path was not published by this script and is not this script's to delete.
-  [ "$locked" = 1 ] && lock_path_usable "$RC_LOCK_HOLDER" \
+  [ "$locked" = 1 ] && path_is_plain_file "$RC_LOCK_HOLDER" \
     && rm -f "$RC_LOCK_HOLDER" 2> /dev/null
   [ "$locked" = 1 ] && flock -u 8 2> /dev/null
   { exec 8>&-; } 2> /dev/null
