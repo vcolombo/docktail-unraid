@@ -15,22 +15,238 @@ DOCKER_SOCK="/var/run/docker.sock"
 TAILSCALED_SOCK="/var/run/tailscale/tailscaled.sock"
 PGREP="/usr/bin/pgrep"
 PKILL="/usr/bin/pkill"
+TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Used before any config or lifecycle locking: those paths invoke flock and
+# chmod as root, and the fail-open branches are only meant for a genuinely
+# missing utility or a held lock, not for an inherited PATH.
+export PATH="$TRUSTED_PATH"
 
 # Seconds to wait for a graceful drain before SIGKILL. Must exceed DockTail's
 # own 30s shutdown cleanup context: cutting it short leaves stale Tailscale
 # Services advertised on the tailnet.
 STOP_TIMEOUT=35
 
+# Seconds a start waits for the new daemon to become visible to is_running()
+# before giving up on it, while holding the lifecycle lock. Covers a fork and
+# an exec, not a slow first reconcile: DockTail is matched by its command line,
+# which is set the moment it execs.
+START_VISIBLE_TIMEOUT=5
+
+# argv[0] of the shell that writes the pidfile and then exec's DockTail, and
+# the prefix of the token that identifies one particular launch.
+#
+# A fixed string was not enough: `pkill -f` would match anything whose command
+# line contains it, so a coincidence - or an argv somebody chose - could have
+# been signalled instead. Each launch therefore gets random bytes appended,
+# written into the pidfile beside the pid, and the stop matches on that.
+LAUNCH_MARKER="docktail-launcher"
+
+# launch_token - a marker nothing else can be carrying.
+launch_token() {
+  local bytes
+  bytes=$(od -An -tx1 -N8 /dev/urandom 2> /dev/null | tr -d ' \n')
+  [ -n "$bytes" ] || bytes="$$-$(date +%s)"
+  echo "${LAUNCH_MARKER}-${bytes}"
+}
+
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') rc.docktail: $*" >> "$LOG"
 }
 
+# These files are data, not code. Sourcing them made bash the parser, which
+# meant every character in a stored credential was a potential command: a $ or
+# a backtick from an older plugin version, and with a blacklist check, any
+# plain command a hand-edited file cared to include. So they are read instead.
+#
+# Only KEY="value" is recognised - the exact grammar the webGUI writes - and a
+# line that is not that is logged and skipped rather than guessed at. Values
+# are assigned with declare, which does not re-expand what it is given, so a
+# legacy value like x$(id)y arrives as those literal characters.
+# Undo exactly what the webGUI's renderBody() escapes - \\, \" and \$ - and
+# nothing else, left to right in one pass. Answers in REPLY.
+#
+# Done character by character rather than with substitutions: parking escaped
+# backslashes on a placeholder byte would corrupt any value that legitimately
+# contained that byte, and a legacy file can contain anything.
+unescape_value() {
+  local in="$1" out="" head next
+
+  while [ -n "$in" ]; do
+    head="${in:0:1}"
+
+    if [ "$head" = '\' ]; then
+      # A backslash with nothing after it cannot have come from
+      # renderBody(), and PHP's ini parser would read the rest of the file
+      # differently, so the two sides would disagree about the value.
+      [ "${#in}" -gt 1 ] || return 1
+
+      next="${in:1:1}"
+      case "$next" in
+        '\' | '"' | '$')
+          out="${out}${next}"
+          in="${in:2}"
+          continue
+          ;;
+      esac
+    elif [ "$head" = '"' ]; then
+      # An unescaped quote inside the value means the closing quote was not
+      # where the line said it was - reject rather than guess, because PHP
+      # reads such a line differently again.
+      return 1
+    fi
+
+    out="${out}${head}"
+    in="${in:1}"
+  done
+
+  REPLY="$out"
+  return 0
+}
+
+# The only names a config file may set. Without this an uppercase-looking
+# assignment in a hand-edited or legacy file would land on one of this
+# script's own variables - BIN="/tmp/payload" would then be executed as root
+# by start_docktail(), and PGREP the same through is_running(). Mirrored by
+# Config::KNOWN_KEYS on the PHP side.
+config_key_is_known() {
+  case "$1" in
+    ENABLE_DOCKTAIL | TAILSCALE_TAILNET | DEFAULT_SERVICE_TAGS | IGNORE_SERVICE_NAMES | \
+    DELETE_UNUSED_SERVICES | SKIP_SHUTDOWN_CLEANUP | RECONCILE_INTERVAL | LOG_LEVEL | \
+    TAILSCALE_OAUTH_CLIENT_ID | TAILSCALE_OAUTH_CLIENT_SECRET | TAILSCALE_API_KEY | \
+    DOCKTAIL_CLOUD_KEY)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+read_config() {
+  local file="$1" line key value
+
+  # The whole file, not the line. A NUL cannot be carried by a shell variable
+  # at all: `read` drops it before the pattern below ever sees it, so this
+  # reader cannot tell which record held one - and a NUL inside a *key* would
+  # close up into a name it recognises. PHP's reader refuses every line of such
+  # a file for the same reason, so refusing it here too is what keeps the two
+  # in agreement; the migration reports it as unparseable and leaves it alone,
+  # and DockTail falls back to default.cfg for whatever it held.
+  if [ "$(tr -d '\0' < "$file" | wc -c)" != "$(wc -c < "$file")" ]; then
+    log "Ignoring $file: it contains a NUL byte, which this reader cannot carry and PHP's reader refuses, so neither would agree about a single line of it. Repair the file; the settings page shows the shipped defaults for whatever it held."
+    return 0
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Trailing CR, so a file that has been through a Windows editor still reads.
+    line="${line%$'\r'}"
+
+    case "$line" in
+      '' | '#'*) continue ;;
+    esac
+
+    if [[ ! "$line" =~ ^([A-Z][A-Z0-9_]*)=\"(.*)\"$ ]]; then
+      log "Ignoring an unrecognised line in $file: only KEY=\"value\" is read."
+      continue
+    fi
+
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+
+    if ! config_key_is_known "$key"; then
+      log "Ignoring $key in $file: not a DockTail setting."
+      continue
+    fi
+
+    if ! unescape_value "$value"; then
+      log "Ignoring $key in $file: the quoted value is malformed, so PHP and this reader would disagree about it."
+      continue
+    fi
+    value="$REPLY"
+
+    declare -g "$key=$value"
+  done < "$file"
+}
+
+# The webGUI writes the two files under a lock, one rename each, so reading
+# them without it can pick up the new settings with the previous credentials -
+# an OAuth client ID beside the secret it replaced. The boot path is where this
+# actually collides: Unraid reinstalls the plugin on every boot, and doinst.sh
+# takes the same lock to convert legacy files while this script is starting.
+#
+# Shared, so concurrent starts do not wait on each other, and bounded: a boot
+# that hangs on a lock is a worse failure than one stale reconcile cycle, and a
+# writer only holds it for two file writes. Missing flock, or a wait that runs
+# out, reads anyway and says so - never refuses to start.
+CONFIG_LOCK="/var/run/docktail-config.lock"
+
+# The same number Config::LOCK_WAIT uses on the PHP side, so a held lock means
+# the same thing whichever side hits it.
+CONFIG_LOCK_WAIT=5
+
+# path_is_plain_file PATH - is it safe to open this as a lock file?
+#
+# A redirection opens whatever is at the path, and opening a FIFO blocks until
+# the other end appears - for writing until a reader does, for reading until a
+# writer does. Before flock, before any timeout, before any diagnostic. A named
+# pipe at a lock path, the holder path or the pidfile therefore hangs exactly
+# the thing the bounded waits exist to keep bounded: load_config() during boot,
+# or every start and stop. Absent is fine - the redirection creates it - and so
+# is a regular file; anything else is refused by its caller.
+path_is_plain_file() {
+  # -L first, and explicitly: every other test here follows a link, so a
+  # dangling one reads as an absent path - and then the redirection follows it
+  # and creates whatever it points at, anywhere on the system, as root. A link
+  # that does resolve is refused too: the lock would be taken on an inode
+  # somebody else chose, which is not serialisation.
+  [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; }
+}
+
 load_config() {
-  # Defaults first, user settings on top, then secrets. All three files are
-  # plain KEY="value", safe to source.
-  [ -f "${PLUGIN_ROOT}/default.cfg" ] && . "${PLUGIN_ROOT}/default.cfg"
-  [ -f "${CONFIG_DIR}/docktail.cfg" ] && . "${CONFIG_DIR}/docktail.cfg"
-  [ -f "${CONFIG_DIR}/credentials.cfg" ] && . "${CONFIG_DIR}/credentials.cfg"
+  local file locked=0 opened=1 previous_umask
+
+  if ! command -v flock > /dev/null 2>&1; then
+    log "Reading the config without the write lock: no flock on this system. A save landing in the middle of this read could be picked up half-applied."
+  else
+    # Created root-only, matching the PHP side: a shared lock held by another
+    # local user would push every writer out to its fails-open path. The umask
+    # is restored because this one is not scoped to the brace group, and the
+    # redirection is inside one because `exec` with no command would apply it
+    # to this shell for good - load_config() would then be silently discarding
+    # every later start and stop diagnostic.
+    previous_umask=$(umask)
+    umask 077
+    if path_is_plain_file "$CONFIG_LOCK"; then
+      { exec 9>> "$CONFIG_LOCK"; } 2> /dev/null
+      opened=$?
+    else
+      opened=1
+    fi
+    umask "$previous_umask"
+
+    # The umask only covers creating it; an existing one from an older
+    # version of this plugin is tightened here, the way the PHP side does.
+    # Not through a symlink: chmod follows one, so a link left at this
+    # path would be a way to have root change the mode of something
+    # else. The lock still works either way - flock is on the open
+    # descriptor, not on the name.
+    [ "$opened" -eq 0 ] && [ ! -L "$CONFIG_LOCK" ] && chmod 600 "$CONFIG_LOCK" 2> /dev/null
+
+    if [ "$opened" -ne 0 ]; then
+      log "Reading the config without the write lock: $CONFIG_LOCK could not be opened, or is not a regular file. A save landing in the middle of this read could be picked up half-applied."
+    elif flock -s -w "$CONFIG_LOCK_WAIT" 9 2> /dev/null; then
+      locked=1
+    else
+      log "Reading the config without the write lock: still held after ${CONFIG_LOCK_WAIT}s. A save landing now could be picked up half-applied; the Apply that caused it restarts DockTail afterwards."
+    fi
+  fi
+
+  # Defaults first, user settings on top, then secrets.
+  for file in "${PLUGIN_ROOT}/default.cfg" "${CONFIG_DIR}/docktail.cfg" "${CONFIG_DIR}/credentials.cfg"; do
+    [ -f "$file" ] && read_config "$file"
+  done
+
+  [ "$locked" = 1 ] && flock -u 9 2> /dev/null
+  { exec 9>&-; } 2> /dev/null
   return 0
 }
 
@@ -41,8 +257,65 @@ export_if_set() {
   return 0
 }
 
+# cleanup_pattern - everything a launch of $BIN can look like, for the kills
+# that have to catch all of it.
+#
+# Two shapes, because $BIN can be either kind of file: a compiled binary is
+# exec'd directly and is its own argv[0], where a script is run by its
+# interpreter, which becomes argv[0] with the script after it. DockTail ships
+# as a binary, so is_running() - which answers "is the daemon up" - keeps the
+# anchored form that describes it. These kills are the other question: what
+# might still be running that this start or stop is responsible for, where
+# missing something leaves a second daemon behind, and pid_is_docktail()
+# already accepts both shapes.
+#
+# The path is escaped because this is a regular expression: a dot in a
+# directory name would otherwise match anything.
+#
+# The interpreter branch names the same shells pid_is_docktail() accepts, and
+# nothing else. `[^ ]*sh` would have matched /usr/bin/ssh, fish, or any
+# executable a user happened to name mysh - so a root process whose next
+# argument was this path would have been killed as though it were the daemon.
+# The two must agree: anything these kills reach, that predicate has to call
+# ours.
+cleanup_pattern() {
+  local escaped
+  escaped=$(printf '%s' "$BIN" | sed -e 's/[][\.^$*+?(){}|\/]/\\&/g')
+
+  printf '(^%s( |$))|(^([^ ]*\/)?(bash|sh|dash|ash|ksh) %s( |$))' "$escaped" "$escaped"
+}
+
 is_running() {
   "$PGREP" --ns $$ --euid root -f "^${BIN}" 1> /dev/null 2> /dev/null
+}
+
+# ensure_gone PID - wait out a TERM already sent, escalate, and answer whether
+# the way is clear for a new daemon.
+#
+# The two adoption fallbacks send a TERM and then went straight on to launch.
+# A TERM is a request: a daemon draining its Services takes as long as that
+# takes, and one that ignores the signal takes forever - so the old one and
+# the new one overlapped, which is the two-daemon state those branches exist
+# to prevent. is_running() cannot answer this on its own either, because a
+# script-shaped $BIN is invisible to it by design, so the recorded pid is
+# checked as well.
+#
+# The bound is the ordinary stop's, because this is the ordinary stop's work.
+ensure_gone() {
+  local pid="$1" waited=0
+
+  while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
+    if ! is_running && ! pid_is_docktail "$pid"; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  "$PKILL" --ns $$ --euid root -KILL -f "$(cleanup_pattern)" 2> /dev/null
+  sleep 1
+
+  ! is_running && ! pid_is_docktail "$pid"
 }
 
 start_docktail() {
@@ -75,9 +348,76 @@ start_docktail() {
     return 0
   fi
 
+  # Not visible, but the pidfile may name a launcher that has not exec'd yet -
+  # the child writes that file itself before exec'ing, so it exists whenever the
+  # child does, however the launching shell died. is_running() cannot see those:
+  # the process is still the launcher shell. Launching a second one here is how
+  # two daemons end up reconciling the same tailnet, so this waits for it.
+  #
+  # Guarded, because reading a FIFO blocks until somebody writes to it: a
+  # named pipe at this path would stop a start here, holding the lifecycle
+  # lock, before any of the bounds below apply.
+  local adopted adopted_token
+  if path_is_plain_file "$PIDFILE"; then
+    read -r adopted adopted_token < "$PIDFILE" 2> /dev/null || true
+  fi
+  if pid_is_docktail "$adopted"; then
+    log "A start is already in flight as pid $adopted; waiting for it rather than launching a second daemon."
+
+    local watch=0
+    while [ "$watch" -lt "$((START_VISIBLE_TIMEOUT * 10))" ]; do
+      is_running && break
+      pid_is_docktail "$adopted" || break
+      sleep 0.1
+      watch=$((watch + 1))
+    done
+
+    if is_running; then
+      log "DockTail came up as pid $adopted."
+      return 0
+    fi
+
+    if pid_is_docktail "$adopted"; then
+      log "The in-flight start as pid $adopted never came up; stopping it before starting again."
+      # Rechecked after the log line, not before it: the pid can exit in the
+      # gap and be handed to something else, and an unchecked TERM is the same
+      # mistake as an unchecked KILL.
+      pid_is_docktail "$adopted" && signal_launcher TERM "$adopted_token"
+      local settle=0
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$adopted"; do
+        sleep 1
+        settle=$((settle + 1))
+      done
+      pid_is_docktail "$adopted" && signal_launcher KILL "$adopted_token"
+
+      # It can exec during that wait - slowly, but it got there. Then the
+      # marker is gone, so signal_launcher matched nothing, and what is on the
+      # end of that pid is the daemon somebody asked for. Falling through here
+      # would start a second one, which is the whole thing this branch exists
+      # to prevent, so this is checked before anything else happens.
+      if is_running; then
+        log "DockTail came up as pid $adopted while it was being stopped; leaving it running rather than starting a second one."
+        return 0
+      fi
+
+      # And if it exec'd but is still not visible - a $BIN that is a script,
+      # mid-interpreter - the anchored name catches what the marker cannot.
+      "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
+
+      # A TERM is a request, and this function is about to launch a daemon. If
+      # the old one is still draining - or ignoring the signal - starting now
+      # is the overlap this whole branch exists to prevent, so the launch is
+      # refused rather than risked.
+      if ! ensure_gone "$adopted"; then
+        log "Pid $adopted did not stop, so DockTail is not being started: a second daemon would advertise the same Services as the first."
+        return 1
+      fi
+    fi
+  fi
+
   # DockTail resolves the tailscale CLI from PATH; the Tailscale plugin
   # symlinks it into /usr/local/sbin.
-  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH="$TRUSTED_PATH"
 
   export_if_set RECONCILE_INTERVAL "${RECONCILE_INTERVAL}"
   export_if_set LOG_LEVEL "${LOG_LEVEL}"
@@ -92,24 +432,278 @@ start_docktail() {
   export_if_set DOCKTAIL_CLOUD_KEY "${DOCKTAIL_CLOUD_KEY}"
 
   log "Starting DockTail: $BIN"
-  nohup "$BIN" >> "$LOG" 2>&1 &
-  echo $! > "$PIDFILE"
+  # The child writes its own pidfile and then exec's, so there is no window
+  # where a launched daemon exists with nothing naming it: this shell can be
+  # killed immediately after the fork and the record still appears. Doing it
+  # from here - `echo $! > $PIDFILE` after the `&` - left exactly that window,
+  # and closing it by scanning for processes whose argv mentions the binary
+  # meant a `grep` could be mistaken for a daemon.
+  #
+  # $LAUNCH_MARKER is the provenance: it is in the argv of our launcher and
+  # nothing else, so the pre-exec process can be identified as ours rather
+  # than guessed at from a command line.
+  #
+  # 8 is the lifecycle lock, 9 the config lock. An inherited descriptor shares
+  # the open file description that owns the lock, so a daemon holding a copy
+  # keeps it alive - which is useful for exactly as long as the handshake
+  # below, and unacceptable afterwards.
+  # The child inherits the lifecycle lock and closes it *after* writing the
+  # pidfile, not before: that is what closes the last of this window. If this
+  # shell is killed between the fork and the child's write, the lock is still
+  # held - by the child - so a concurrent start waits rather than launching a
+  # second daemon, and by the time it gets the lock the pidfile exists. The
+  # daemon itself must not hold either descriptor, so the child drops both in
+  # the same breath as its exec.
+  # The child's first act is to write the pidfile, and writing to a FIFO
+  # blocks until a reader appears - so a named pipe at this path would hang
+  # the launcher before its exec, with this shell waiting on it and the
+  # lifecycle lock held. Unlike the config files, this path is the script's
+  # own: it creates it on every start and removes it on every stop, so
+  # clearing something that is not a pidfile is tidying up after whatever left
+  # it, not overruling anybody. A symlink goes the same way - rm takes the
+  # link, never what it points at.
+  # No -e in front of this: that test follows links, so a dangling one would
+  # have read as absent and been left exactly where the child's redirection
+  # could follow it - which is the write this guard exists to stop. The
+  # predicate already answers "absent" with yes.
+  if ! path_is_plain_file "$PIDFILE"; then
+    log "$PIDFILE is not a regular file; removing it before starting, because writing the new pid to it could block forever."
+    rm -f "$PIDFILE"
+  fi
+
+  local token launch_token_of_started
+  token=$(launch_token)
+  launch_token_of_started="$token"
+  nohup bash -c 'echo "$$ $0" > "$2"; exec 8>&- 9>&-; exec "$1"' \
+    "$token" "$BIN" "$PIDFILE" >> "$LOG" 2>&1 &
+  started=$!
+
+  # Held until the daemon is visible to is_running(), because the lock is only
+  # worth holding for that long: a stop taking the lock in the gap between the
+  # fork and the exec would look around, see nothing running, finish - and the
+  # daemon would come up behind it. Bounded, because a start that never
+  # becomes visible must not hold the lock for the next action either; the
+  # pidfile is already written and stop_docktail() falls back to it.
+  waited=0
+  while [ "$waited" -lt "$((START_VISIBLE_TIMEOUT * 10))" ]; do
+    is_running && break
+    pid_is_docktail "$started" || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  if ! is_running; then
+    # Either it exited, or it is still somewhere before its exec after the
+    # whole bound. The second case cannot be left alone: this function is
+    # about to release the lifecycle lock, the next start does not consult the
+    # pidfile, and a child that becomes visible afterwards is a second daemon
+    # nothing is tracking. So it is stopped here, while the lock is still held.
+    if pid_is_docktail "$started"; then
+      log "DockTail was launched as pid $started and has not started within ${START_VISIBLE_TIMEOUT}s; stopping it rather than leaving it to come up untracked."
+      signal_launcher TERM "$launch_token_of_started"
+      local settle=0
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$started"; do
+        sleep 1
+        settle=$((settle + 1))
+      done
+      pid_is_docktail "$started" && signal_launcher KILL "$launch_token_of_started"
+
+      # And by its own name, in case it exec'd during the wait: the marker
+      # lives in the launcher's argv and is gone the moment DockTail replaces
+      # it, so the two patterns cover the two halves of that handover.
+      "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
+
+      # Said plainly when it does not work, because the next start is the
+      # thing that turns a survivor into two daemons and this is the last
+      # place that can see it.
+      ensure_gone "$started" \
+        || log "Pid $started did not stop; a later start could bring up a second daemon beside it."
+    else
+      log "DockTail was launched as pid $started but is not running: see the log above for why it exited."
+    fi
+
+    rm -f "$PIDFILE"
+
+    return 1
+  fi
+
+  return 0
+}
+
+# pid_is_docktail PID - is this pid, right now, the DockTail this script runs?
+#
+# A pidfile outlives its process and pids are reused, so the file alone is not
+# evidence: without this a stale one would aim TERM and then KILL at whatever
+# root process inherited the number. /proc is the authority.
+#
+# 0 is a process group rather than a process - `kill 0` signals this script's
+# own group - and 1 is init; neither is ever DockTail. The command line is
+# matched anywhere rather than at the front, because the window this exists for
+# is before the exec: the pid may still be `nohup $BIN`, or the interpreter of
+# a $BIN that is a script.
+pid_is_docktail() {
+  local pid="$1"
+
+  case "$pid" in
+  '' | *[!0-9]* | 0 | 1) return 1 ;;
+  esac
+
+  # Root, like is_running() and the pkill calls require. Without this an
+  # unprivileged process whose argv happens to contain this path - not hard to
+  # arrange - would pass the check below and be signalled by a root script.
+  case "$(awk '/^Uid:/ { print $2; exit }' "/proc/$pid/status" 2> /dev/null)" in
+  0) ;;
+  *) return 1 ;;
+  esac
+
+  # Four ways to be DockTail, each of them positional rather than a substring -
+  # `grep "$BIN"` has the path in its argv and matches none of them, because
+  # there it is an operand rather than the thing being run.
+  #
+  # /proc/<pid>/exe first: it is the kernel's answer and cannot be arranged by
+  # a caller. It is not always readable, though - under binary emulation it
+  # comes back empty - so it cannot be the only rule.
+  local exe binary
+  exe=$(readlink -f "/proc/$pid/exe" 2> /dev/null)
+  binary=$(readlink -f "$BIN" 2> /dev/null)
+  [ -n "$exe" ] && [ -n "$binary" ] && [ "$exe" = "$binary" ] && return 0
+
+  local argv0="" argv1="" arg marked=0 named=0 index=0
+  while IFS= read -r -d '' arg; do
+    case "$index" in
+    0) argv0="$arg" ;;
+    1) argv1="$arg" ;;
+    esac
+    # The prefix, because the token carries random bytes after it. Matching
+    # the bare marker stopped identifying anything the moment the token was
+    # introduced, and only the tests' script-shaped $BIN hid it: a compiled
+    # binary has no interpreter layer to fall back on, so the pre-exec
+    # launcher - the whole reason this branch exists - went unrecognised.
+    case "$arg" in
+    "$LAUNCH_MARKER" | "${LAUNCH_MARKER}-"*) marked=1 ;;
+    esac
+    [ "$arg" = "$BIN" ] && named=1
+    index=$((index + 1))
+  done < "/proc/$pid/cmdline" 2> /dev/null
+
+  # Our own launcher, before it exec's: the marker is in its argv[0] and in
+  # nothing else on the system, and the path it was given is there too.
+  [ "$marked" = 1 ] && [ "$named" = 1 ] && return 0
+
+  # The daemon itself, named by what it is running as.
+  [ "$argv0" = "$BIN" ] && return 0
+
+  # And $BIN as a script: the kernel runs the interpreter with the script as
+  # its first argument, which is that script running.
+  if [ "$argv1" = "$BIN" ]; then
+    case "$(basename -- "$argv0" 2> /dev/null)" in
+    bash | sh | dash | ash | ksh) return 0 ;;
+    esac
+  fi
+
+  return 1
+}
+
+# signal_launcher SIGNAL - stop the pre-exec launcher, by what it is rather
+# than by a number.
+#
+# `pid_is_docktail` and `kill` are two syscalls, so a pid validated by the
+# first can be gone and reused by the time the second runs - and then the
+# signal lands on a stranger. There is no pidfd tool in Slackware's base, so
+# the number cannot be bound to the identity here; what can be done is to stop
+# using the number for the signal at all.
+#
+# pkill matches and signals in one process, on the launch token, which exists
+# in the argv of one launcher and nothing else - it is random per launch, so a
+# coincidence cannot carry it and nobody can arrange to be signalled instead. A reused pid cannot be hit by it:
+# to be matched, a process would have to carry the marker, which only this
+# script's launcher does. The pid is still used to decide *whether* to act and
+# to wait for the outcome - both harmless if it has been reused, because the
+# next check simply says no.
+#
+# The lifecycle lock is held in every path that calls this, so the only
+# launcher this can match is the one being stopped.
+signal_launcher() {
+  local signal="$1" token="$2"
+
+  # Nothing to match on means nothing to signal: a pidfile from a version
+  # before the token, or a truncated one. The anchored pkill on the binary's
+  # own name is what covers those, in the callers.
+  case "$token" in
+  "${LAUNCH_MARKER}-"*) ;;
+  *) return 0 ;;
+  esac
+
+  "$PKILL" --ns $$ --euid root "-$signal" -f "$token" 2> /dev/null
   return 0
 }
 
 stop_docktail() {
+  # The pidfile, not just what is visible: a start whose shell was killed
+  # between the fork and the exec releases the lifecycle lock as it dies, so a
+  # stop can arrive while that child exists but does not match yet. Its pid was
+  # written before the wait, so it can still be found - and killing it here is
+  # the difference between a stop that worked and a daemon that comes up behind
+  # it with nothing tracking it.
+  local recorded="" recorded_token=""
+  if [ -f "$PIDFILE" ]; then
+    read -r recorded recorded_token < "$PIDFILE" 2> /dev/null || true
+  fi
+
   if ! is_running; then
-    log "DockTail is not running."
-    rm -f "$PIDFILE"
-    return 0
+    # Re-checked immediately before each signal rather than once up front: the
+    # settle loop below can outlast the process, and a pid freed in it can be
+    # handed to something else before the SIGKILL lands.
+    if pid_is_docktail "$recorded"; then
+      log "DockTail is starting as pid $recorded and not visible yet; stopping it by pid."
+      pid_is_docktail "$recorded" && signal_launcher TERM "$recorded_token"
+      local settle=0
+      while [ "$settle" -lt "$START_VISIBLE_TIMEOUT" ] && pid_is_docktail "$recorded"; do
+        sleep 1
+        settle=$((settle + 1))
+      done
+      pid_is_docktail "$recorded" && signal_launcher KILL "$recorded_token"
+    else
+      log "DockTail is not running."
+    fi
+
+    # Two ways the work above can leave something behind, so what matters here
+    # is whether anything is still there - by identity as well as by
+    # visibility, because those two do not answer the same question.
+    #
+    # It can exec while the settle loop runs, and then the token matches
+    # nothing and what is on the end of that pid is a running daemon. Or the
+    # token was never there to match: a pidfile from a version before it,
+    # where the signals above were no-ops and the process is exactly as alive
+    # as it was. is_running() sees neither case if $BIN is a script, because
+    # it asks for the anchored form deliberately.
+    #
+    # Returning here would leave a daemon with its Tailscale Services
+    # advertised, which during a Docker shutdown is the failure this script
+    # exists to avoid. So anything still recognisable falls through to the
+    # ordinary stop, whose kills match every shape pid_is_docktail accepts.
+    if ! is_running && ! pid_is_docktail "$recorded"; then
+      rm -f "$PIDFILE"
+
+      return 0
+    fi
+
+    if is_running; then
+      log "DockTail became visible while it was being stopped; draining it properly."
+    else
+      log "Pid $recorded is still DockTail and the pidfile carried no launch token; stopping it by what it is running."
+    fi
   fi
 
   log "Stopping DockTail, waiting up to ${STOP_TIMEOUT}s for service cleanup."
-  "$PKILL" --ns $$ --euid root -TERM -f "^${BIN}" 2> /dev/null
+  "$PKILL" --ns $$ --euid root -TERM -f "$(cleanup_pattern)" 2> /dev/null
 
+  # The same two questions as above: a script-shaped daemon is never visible
+  # to is_running(), so waiting on that alone would call it stopped while it
+  # is still there - and skip the SIGKILL the timeout exists to send.
   local waited=0
   while [ "$waited" -lt "$STOP_TIMEOUT" ]; do
-    if ! is_running; then
+    if ! is_running && ! pid_is_docktail "$recorded"; then
       log "DockTail stopped after ${waited}s."
       rm -f "$PIDFILE"
       return 0
@@ -119,7 +713,7 @@ stop_docktail() {
   done
 
   log "DockTail did not exit within ${STOP_TIMEOUT}s, sending SIGKILL (advertised services may be left behind)."
-  "$PKILL" --ns $$ --euid root -KILL -f "^${BIN}" 2> /dev/null
+  "$PKILL" --ns $$ --euid root -KILL -f "$(cleanup_pattern)" 2> /dev/null
   rm -f "$PIDFILE"
   return 0
 }
@@ -138,20 +732,194 @@ status_docktail() {
   fi
 }
 
+# Lifecycle actions are serialised against each other. Every save schedules
+# restart.sh, which queues an independent `at` job, and the Docker events
+# queue their own - so two of these can land together, and none of the checks
+# below is atomic: two starts can both see is_running() false and leave two
+# daemons reconciling the same tailnet with $PIDFILE naming only one of them,
+# and a stop can kill a daemon the other invocation just started.
+#
+# Exclusive, and waited for rather than skipped: a queued restart exists
+# because somebody's settings changed, so it has to happen after the one in
+# flight, not instead of it. status stays outside: the settings page polls it
+# while a restart is running.
+#
+# The bound has to cover the longest thing that can hold this lock, which is a
+# restart: a stop and its drain, the pause between, the config lock's own wait
+# inside load_config(), then a start waiting for the daemon to be visible and,
+# if it never is, stopping it again. Bounding it by the stop alone let a
+# concurrent action time out at 45s while a restart legitimately held the lock
+# for longer - and then run unlocked, which is the race this exists to stop.
+RC_LOCK="/var/run/docktail-lifecycle.lock"
+# Who holds it, for the wait below to tell a queue from something wedged.
+# Advisory only: it is read without the lock and nothing depends on it being
+# right, just on it changing when the lock changes hands.
+RC_LOCK_HOLDER="${RC_LOCK}.holder"
+#
+# Every part of the worst case, which is a restart that goes wrong at each
+# step: the stop and its drain (STOP_TIMEOUT), the pause between, the config
+# lock's own wait inside load_config(), then a start that finds a launcher in
+# flight - settling for START_VISIBLE_TIMEOUT and draining it with
+# ensure_gone(), another STOP_TIMEOUT - launches, waits START_VISIBLE_TIMEOUT
+# for the daemon to appear, does not see it, and drains that one too. Three
+# stop timeouts, not one: ensure_gone() is newer than this arithmetic was, and
+# a bound that does not include it is a bound that expires on a healthy
+# restart.
+RC_LOCK_WAIT=$((STOP_TIMEOUT * 3 + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 3 + 15))
+# Whole windows to wait through while the queue is visibly moving.
+#
+# Two, not three: each window now covers the true worst case rather than a
+# third of it, so two of them is already a longer wait than three used to be -
+# and past that, refusing is the safe answer rather than the patient one. The
+# caller is told, and nothing is done unserialised either way.
+RC_LOCK_TURNS=2
+
+# take_lifecycle_lock - wait for fd 8, for as long as waiting is progress.
+#
+# One window covers the longest thing that can legitimately hold this lock: a
+# restart is a stop and its drain, the pause between, the config lock's own
+# wait inside load_config(), then a start waiting for the daemon to be visible
+# and, if it never is, stopping it again. But a bound that covers one restart
+# does not cover two queued ahead of you, and the third invocation then timed
+# out and ran unlocked - the exact interleaving this lock exists to prevent,
+# arriving precisely when the system is busiest with lifecycle work.
+#
+# So a window that expires while the lock has changed hands is not a timeout,
+# it is a queue: the wait starts again, up to RC_LOCK_TURNS of them. A window
+# that expires with the same pid still holding it is something stuck, and that
+# is the only case that gives up.
+take_lifecycle_lock() {
+  local turns=0 last="" current=""
+
+  while :; do
+    if flock -w "$RC_LOCK_WAIT" 8 2> /dev/null; then
+      return 0
+    fi
+
+    current=$(path_is_plain_file "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null)
+    turns=$((turns + 1))
+
+    # The same pid through a whole window is something stuck, and the only
+    # case worth giving up on early. Anything else is treated as a queue and
+    # given another window up to the cap - including a holder that publishes
+    # no pid at all, which is what an rc.docktail from before this file
+    # existed looks like during an upgrade. Refusing to wait for a perfectly
+    # healthy predecessor would be a worse bug than the one this fixes.
+    if [ -n "$current" ] && [ "$current" = "$last" ]; then
+      return 1
+    fi
+
+    [ "$turns" -ge "$RC_LOCK_TURNS" ] && return 1
+    last="$current"
+  done
+}
+
+serialised() {
+  local action="$1" locked=0 opened=1 previous_umask rc=0
+
+  # Every way of not having the lock ends the same way: nothing runs. The
+  # earlier version logged and carried on, which is the concurrent start/stop
+  # this lock exists to prevent - arriving in exactly the situations where
+  # something is already wrong with the system. A start that did not happen is
+  # visible on the settings page and in this log; two daemons advertising the
+  # same Services are visible to nobody until the tailnet disagrees with
+  # itself.
+  if ! command -v flock > /dev/null 2>&1; then
+    log "Not running $action: there is no flock on this system, so a start and a stop landing together could leave two daemons and nothing here could tell. Install util-linux."
+
+    return 1
+  else
+    # Same shape as the config lock above - root-only, umask restored, and the
+    # redirection inside a brace group so it does not apply to this shell.
+    previous_umask=$(umask)
+    umask 077
+    if path_is_plain_file "$RC_LOCK"; then
+      { exec 8>> "$RC_LOCK"; } 2> /dev/null
+      opened=$?
+    else
+      opened=1
+    fi
+    umask "$previous_umask"
+
+    # Not through a symlink: chmod follows one, so a link left at this
+    # path would be a way to have root change the mode of something
+    # else. The lock still works either way - flock is on the open
+    # descriptor, not on the name.
+    [ "$opened" -eq 0 ] && [ ! -L "$RC_LOCK" ] && chmod 600 "$RC_LOCK" 2> /dev/null
+
+    if [ "$opened" -ne 0 ]; then
+      log "Not running $action: $RC_LOCK could not be opened, or is not a regular file - a symlink, a FIFO or a directory there is not something this can lock. Remove it. Running unlocked could leave two daemons."
+      { exec 8>&-; } 2> /dev/null
+
+      return 1
+    elif take_lifecycle_lock; then
+      locked=1
+      # Guarded like the lock itself: a FIFO left at the holder path would
+      # block this write until a reader appeared, hanging the start it has
+      # just serialised. Publishing the pid is advisory, so skipping it costs
+      # a waiter one turn of patience and nothing else.
+      path_is_plain_file "$RC_LOCK_HOLDER" \
+        && printf '%s\n' "$$" > "$RC_LOCK_HOLDER" 2> /dev/null
+    else
+      # Nothing, rather than the same work unserialised. A start interleaved
+      # with a stop leaves either two daemons advertising the same Services or
+      # none at all, and whatever is holding the lock this long is doing
+      # lifecycle work of its own - so the outcome of doing nothing is the one
+      # that holder produces, which is a defined one.
+      log "Not running $action: the lifecycle lock has been held by pid $(path_is_plain_file "$RC_LOCK_HOLDER" && cat "$RC_LOCK_HOLDER" 2> /dev/null) for ${RC_LOCK_WAIT}s without changing hands. Running it unlocked could leave two daemons, so this does nothing and leaves the outcome to whatever holds the lock."
+      { exec 8>&-; } 2> /dev/null
+
+      return 1
+    fi
+  fi
+
+  case "$action" in
+  'start') start_docktail ;;
+  'stop') stop_docktail ;;
+  'restart') restart_docktail ;;
+  esac
+  rc=$?
+
+  # Before the unlock, so the next holder never sees the last one's pid - and
+  # only the file this function would have written. Something else at that
+  # path was not published by this script and is not this script's to delete.
+  [ "$locked" = 1 ] && path_is_plain_file "$RC_LOCK_HOLDER" \
+    && rm -f "$RC_LOCK_HOLDER" 2> /dev/null
+  [ "$locked" = 1 ] && flock -u 8 2> /dev/null
+  { exec 8>&-; } 2> /dev/null
+  return $rc
+}
+
 case "$1" in
 'start')
-  start_docktail
+  serialised start
   ;;
 'stop')
-  stop_docktail
+  serialised stop
   ;;
 'restart')
-  restart_docktail
+  serialised restart
   ;;
 'status')
   status_docktail
   ;;
+'budget')
+  # The longest a start, stop or restart can legitimately take, in seconds,
+  # for the callers that have to decide how long to wait for one.
+  #
+  # It exists because those callers had the number written into them: the
+  # settings page allowed 150s while this script, once the lifecycle wait
+  # learned to sit through a queue, could spend 195s before the action even
+  # begins - so the browser gave up on work that was still running and told
+  # somebody it had failed. Two places holding one number is how they drift;
+  # this is the place that knows it.
+  #
+  # The wait (RC_LOCK_WAIT per turn, up to RC_LOCK_TURNS of them), then the
+  # work: a stop and its drain, the config lock's own wait, and a start
+  # waiting twice over for the daemon to become visible.
+  echo $((RC_LOCK_WAIT * RC_LOCK_TURNS + STOP_TIMEOUT + CONFIG_LOCK_WAIT + START_VISIBLE_TIMEOUT * 2 + 5))
+  ;;
 *)
-  echo "usage $0 start|stop|restart|status"
+  echo "usage $0 start|stop|restart|status|budget"
   ;;
 esac

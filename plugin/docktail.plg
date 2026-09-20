@@ -60,18 +60,55 @@ if [ -d "/usr/local/emhttp/plugins/docktail" ]; then
     rm -rf /usr/local/emhttp/plugins/docktail
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
-
 mkdir -p /boot/config/plugins/docktail
 
 # Keep tailnet credentials out of Unraid Connect's flash backup, which is a git
-# repo at /boot/.git.
-echo "credentials.cfg" > /boot/config/plugins/docktail/.gitignore
+# repo at /boot/.git. Both files' temps are listed, not just the credentials
+# one: a save renames a staged file into place, a worker that dies between the
+# two leaves that file behind, and the migration stages docktail.cfg from a
+# state where it may still hold a credential it is about to move out.
+#
+# Before upgradepkg, not after: the package's doinst.sh runs the config
+# migration, which stages those temps - so the patterns have to be on the flash
+# before anything can write one.
+printf 'credentials.cfg\ncredentials.cfg.tmp\ncredentials.cfg.tmp.*\ndocktail.cfg.tmp\ndocktail.cfg.tmp.*\n*.unreadable.*\n' > /boot/config/plugins/docktail/.gitignore
 
-if [ ! -f "/boot/config/plugins/docktail/credentials.cfg" ]; then
-    install -m 0600 /dev/null /boot/config/plugins/docktail/credentials.cfg
+# Before upgradepkg, like the ignore file: the package's doinst.sh runs the
+# migration, which records what the pair looked like - so the pair has to be
+# complete before it looks, or the next boot reports a change that was just
+# this install finishing.
+#
+# noclobber, not a test-then-create: an Apply can land between the two and this
+# would then copy /dev/null over credentials it just saved. `set -C` makes the
+# redirection itself fail when the file exists, which is one atomic syscall.
+#
+# The -e/-L test in front of it is not that race back again - `set -C` is still
+# what guarantees nothing is overwritten. It is there because a redirection
+# opens whatever is at the path, and opening a FIFO for writing blocks until
+# something reads it: a named pipe left at credentials.cfg would hang this
+# install, and it runs at boot. Testing first means a special file is never
+# opened at all, and the branch below reports it instead.
+if [ ! -e /boot/config/plugins/docktail/credentials.cfg ] && [ ! -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    (
+        umask 077
+        set -C
+        : > /boot/config/plugins/docktail/credentials.cfg
+    ) 2> /dev/null || true
 fi
-chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+
+# Only a real file. chmod follows symlinks and has no option not to, so this
+# line - running as root - would otherwise set 0600 on whatever a symlink left
+# at that path happened to point at. The umask above already creates the file
+# private, so this is for the one it did not create: an existing credentials
+# file from a previous install, which the block above left alone.
+if [ -f /boot/config/plugins/docktail/credentials.cfg ] && [ ! -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    chmod 0600 /boot/config/plugins/docktail/credentials.cfg
+elif [ -e /boot/config/plugins/docktail/credentials.cfg ] || [ -L /boot/config/plugins/docktail/credentials.cfg ]; then
+    echo "docktail: /boot/config/plugins/docktail/credentials.cfg is not a regular file - leaving it as it is. DockTail cannot store credentials there until it is replaced with one."
+fi
+
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
+
 
 # Drop the other release channel so both are never installed at once.
 rm -f /boot/config/plugins/docktail-preview.plg
