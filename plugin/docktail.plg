@@ -6,7 +6,7 @@
 <PLUGIN
   name="docktail"
   author="vcolombo"
-  version="2026.09.03.9.5"
+  version="2026.09.20"
   launch="Settings/DockTail"
   pluginURL="https://raw.githubusercontent.com/vcolombo/docktail-unraid/main/plugin/docktail.plg"
   support="https://github.com/vcolombo/docktail-unraid/issues"
@@ -15,6 +15,23 @@
 
 <CHANGES>
 <![CDATA[
+
+### 2026.09.20
+
+## Changes
+
+- Improve service enrollment and connection diagnostics, including inspection-failure reporting and Tailscale policy guidance.
+- Read configuration as data rather than sourcing it as shell code, and explicitly report values that cannot be stored.
+- Harden credential migration and file handling, reject stale settings saves, and serialize daemon lifecycle operations.
+- Report start, stop, and restart failures instead of presenting misleading success messages.
+
+## Updating
+
+Update through Unraid **Plugins → Check for Updates**, then open **Settings → DockTail** and check configuration and service status. If the plugin reports refused or unreadable configuration, follow the displayed guidance before restarting.
+
+The bundled DockTail version remains **1.7.9**.
+
+Full changes: https://github.com/vcolombo/docktail-unraid/compare/2026.09.03.9.5...2026.09.20
 
 ### 2026.09.03.9.5
 
@@ -30,22 +47,14 @@ The package shipped DockTail's compiled binary without the AGPL-3.0 licence text
 
 No functional changes.
 
-### 2026.09.03.9.3
-
-Labels tab: enrolment view, name warnings, and un-enrolling.
-
-- New **Enrolment** table lists every running container with its service name, funnel state and whether DockTail labels are present. The container picker marks enrolled containers too.
-- Reusing a service name now warns, naming the container that already uses it. Two containers advertising one Service undo each other on every reconcile pass. It is advisory only, since reuse is legitimate when replacing a container.
-- New **Remove DockTail labels** button produces the container's Extra Parameters with the DockTail labels stripped and everything else preserved - the supported way to un-enrol a container.
-
 
 For older releases, see https://github.com/vcolombo/docktail-unraid/releases
 ]]>
 </CHANGES>
 
-<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz">
-<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.03.9.5/docktail-unraid-2026.09.03.9.5-noarch-1.txz</URL>
-<SHA256>6f1f726b23ae2818a1edfbdd4baee347b1255a1e46028f13a34b47e95d1798c9</SHA256>
+<FILE Name="/boot/config/plugins/docktail/docktail-unraid-2026.09.20-noarch-1.txz">
+<URL>https://github.com/vcolombo/docktail-unraid/releases/download/2026.09.20/docktail-unraid-2026.09.20-noarch-1.txz</URL>
+<SHA256>e24b857c1165f794c3ec47cb17c405687088a3f6da6af5e78a6ca008bddee189</SHA256>
 </FILE>
 
 <!--
@@ -107,7 +116,7 @@ elif [ -e /boot/config/plugins/docktail/credentials.cfg ] || [ -L /boot/config/p
     echo "docktail: /boot/config/plugins/docktail/credentials.cfg is not a regular file - leaving it as it is. DockTail cannot store credentials there until it is replaced with one."
 fi
 
-upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.03.9.5-noarch-1.txz
+upgradepkg --install-new /boot/config/plugins/docktail/docktail-unraid-2026.09.20-noarch-1.txz
 
 
 # Drop the other release channel so both are never installed at once.
@@ -119,12 +128,12 @@ rm -f /var/log/plugins/docktail-preview.plg
 /usr/local/emhttp/plugins/docktail/restart.sh
 
 # Clean up superseded packages.
-rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.03.9.5')
+rm -f $(ls /boot/config/plugins/docktail/docktail-unraid-*.txz 2>/dev/null | grep -v '2026.09.20')
 
 echo ""
 echo "----------------------------------------------------"
 echo " docktail has been installed."
-echo " Plugin version:   2026.09.03.9.5"
+echo " Plugin version:   2026.09.20"
 echo " DockTail version: 1.7.9"
 echo ""
 echo " Configure it under Settings -> Network Services ->"
