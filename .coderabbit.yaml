@@ -16,8 +16,14 @@ reviews:
         Shell safety first: unquoted variables, missing set -euo pipefail,
         unguarded rm -rf, unchecked command failures, and curl-pipe-shell
         patterns. Judge the diff, not the surroundings.
-    - path: "src/**"
+    - path: "**/*.php"
       instructions: |
         Unraid plugin PHP pages: validate and escape all user input
+        (XSS), never interpolate request data into shell commands.
+        Only findings backed by a demonstrated defect are actionable.
+    - path: "**/*.page"
+      instructions: |
+        Unraid `.page` files: executable PHP after the plugin metadata
+        header. Same bar as PHP: validate and escape all user input
         (XSS), never interpolate request data into shell commands.
         Only findings backed by a demonstrated defect are actionable.
